@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Cubie for Chrome",
+  "short_name": "Cubie",
+  "version": "1.0.1",
+  "description": "The promises you haven't kept yet and today's priorities from Cubie, on every new tab.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Cubie",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "chrome_url_overrides": {
+    "newtab": "src/newtab.html"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "options_page": "src/options.html",
+  "omnibox": {
+    "keyword": "cubie"
+  },
+  "permissions": [
+    "storage",
+    "alarms",
+    "contextMenus",
+    "search"
+  ],
+  "host_permissions": [
+    "http://localhost:5173/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:5173/*"
+      ],
+      "js": [
+        "src/bridge.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+name: Python application
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+# A new push to a PR branch makes the run already in flight worthless, but
+# GitHub still runs it to completion and bills every minute. Cancel those.
+# Runs on main are never cancelled: that one is the post-merge gate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# CI runs checks only. Nothing here builds an image for, or deploys to, any
+# environment: deploys run from a workstation through scripts/.
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    # Without this the ceiling is GitHub's default of 360 minutes, and a single
+    # hung job bills all of it. Fail it instead.
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # The destructive-DDL guard diffs against the base branch.
+        fetch-depth: 0
+    - name: Set up Python 3.10.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10.13"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # ruff is pinned (SOC 2 H-8 determinism): an unpinned "latest" can
+        # change what `ruff format --check` accepts under every open PR.
+        # Bump deliberately: update the pin + run `uvx ruff@<ver> format .`.
+        pip install ruff==0.16.0 pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    - name: Lint with ruff
+      run: |
+        ruff check --output-format=github .
+    - name: Check formatting with ruff
+      run: |
+        ruff format --check .
+    - name: Check local and platform script syntax
+      run: bash -n scripts/dev/up.sh scripts/platform/*.sh
+    - name: Check single Alembic head (SOC 2 H-13)
+      run: |
+        PYTHONPATH=. alembic heads | tee /tmp/heads.txt
+        n=$(grep -c '(head)' /tmp/heads.txt || true)
+        if [ "$n" -ne 1 ]; then
+          echo "::error::Expected exactly 1 Alembic head, found $n. Multiple heads = a migration collision. Renumber off the base branch's head before merging."
+          exit 1
+        fi
+      env:
+        DATABASE_URL: sqlite:///./test.db
+        CLOUDSQL_CONNECTION_NAME: ""
+        DB_USER: ""
+    - name: Check single control Alembic head
+      run: |
+        PYTHONPATH=. alembic -c alembic_control.ini heads | tee /tmp/control-heads.txt
+        n=$(grep -c '(head)' /tmp/control-heads.txt || true)
+        if [ "$n" -ne 1 ]; then
+          echo "::error::Expected exactly 1 control Alembic head, found $n."
+          exit 1
+        fi
+      env:
+        CONTROL_DATABASE_URL: sqlite:///./test_control.db
+    - name: Run control Alembic migrations
+      run: PYTHONPATH=. alembic -c alembic_control.ini upgrade head
+      env:
+        CONTROL_DATABASE_URL: sqlite:///./test_control.db
+        CLOUDSQL_CONNECTION_NAME: ""
+        APP_MODE: local
+    - name: Guard destructive DDL (SOC 2 H-13)
+      if: github.event_name == 'pull_request'
+      run: |
+        # New migrations that drop/truncate data must acknowledge intent with a
+        # `# destructive-ok: <reason>` comment, so destructive DDL is a
+        # deliberate, reviewable decision rather than a silent one.
+        CHANGED=$(git diff --name-only --diff-filter=AM \
+          "origin/${{ github.base_ref }}" HEAD -- 'alembic/versions/*.py' 'alembic_control/versions/*.py' || true)
+        fail=0
+        for f in $CHANGED; do
+          [ -f "$f" ] || continue
+          if grep -qE 'drop_table|drop_column|drop_constraint|drop_index|op\.execute\(.*(DROP|TRUNCATE|DELETE)' "$f"; then
+            if ! grep -q 'destructive-ok:' "$f"; then
+              echo "::error file=$f::Destructive DDL without acknowledgment. If intended, add a comment '# destructive-ok: <reason>' in the migration."
+              fail=1
+            fi
+          fi
+        done
+        exit $fail
+    - name: Run Alembic Migrations
+      run: |
+        PYTHONPATH=. alembic -x workspace=test upgrade head
+      env:
+        DATABASE_URL: sqlite:///./test.db
+        WORKSPACE_DATABASE_DIR: .
+        CUBIE_WORKSPACE: test
+        CLOUDSQL_CONNECTION_NAME: ""
+        DB_USER: ""
+    # The legacy-brand scan is a hard gate on two things: every git-tracked
+    # file, and the built frontend bundle that every browser downloads
+    # (test_frontend_dist_has_no_legacy_brand). The bundle is built here, so
+    # the suite scans what this commit actually ships.
+    - name: Set up Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+    - name: Build the frontend for the bundle scan
+      working-directory: frontend
+      run: |
+        npm ci
+        npm run build
+    - name: Test with pytest
+      run: |
+        # Every change runs the suite, docs included: the legacy-brand scan
+        # (backend/tests/test_no_legacy_brand.py) reads every tracked file,
+        # docs and Markdown too, and frontend/dist built above.
+        # -n 8, the same as the local verification run. The suite waits on
+        # I/O far more than it computes, so eight workers overlap well even on
+        # a two-core runner. Each xdist worker copies the Alembic-built test.db
+        # to its own test_<worker>.db before any engine exists (root
+        # conftest.py), so workers never share a SQLite file; the copies are
+        # gitignored (test_*.db).
+        pytest -n 8 -q -p no:cacheprovider
+      env:
+        GCP_PROJECT_ID: mock-project
+        APP_MODE: dev_mock_auth
+        DATABASE_URL: sqlite:///./test.db
+        GOOGLE_WORKSPACE_DOMAIN: company.com
+        CLOUDSQL_CONNECTION_NAME: ""
+        DB_USER: ""
+
+  frontend:
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        # `npm test` is `node --test` over the .ts files, which needs Node 22's
+        # built-in TypeScript support.
+        node-version: "22"
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+    - name: Install dependencies
+      run: npm ci
+    - name: Test
+      run: npm test
+    - name: Build (type-checks the app and the tests)
+      run: npm run build
+
+# The container vulnerability scan runs nightly in
+# .github/workflows/security-scan.yml rather than on every PR.

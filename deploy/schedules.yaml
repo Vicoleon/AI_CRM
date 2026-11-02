@@ -1,0 +1,142 @@
+# Task 14 source of truth. Task 19 resolves secret references and reconciles
+# these specs; values here contain no credential material.
+version: 1
+schedules:
+  - name: priorities-run-all
+    target: http
+    path: /api/jobs/priorities/run-all
+    method: POST
+    schedule: "0 6 * * 1-5"
+    scope: per_workspace_timezone
+  - name: priorities-next-week
+    target: http
+    path: /api/jobs/priorities/run-next-week
+    method: POST
+    schedule: "0 15 * * 5"
+    scope: per_workspace_timezone
+  - name: priorities-deliver-slack
+    target: http
+    path: /api/agents/priorities/deliver-slack
+    method: POST
+    schedule: "0 8 * * 1-5"
+    scope: per_workspace_timezone
+  - name: priorities-deliver-next-week
+    target: http
+    path: /api/agents/priorities/deliver-slack
+    method: POST
+    schedule: "0 16 * * 5"
+    scope: per_workspace_timezone
+    body:
+      report: next_week
+  - name: manager-digest
+    target: http
+    path: /api/agents/priorities/manager-digest
+    method: POST
+    schedule: "0 17 * * 1-5"
+    scope: per_workspace_timezone
+  - name: overnight-run
+    target: http
+    path: /api/agents/overnight/run
+    method: POST
+    schedule: "0 2 * * *"
+    scope: per_workspace_timezone
+  - name: availability-refresh-ooo
+    target: http
+    path: /api/agents/availability/refresh-ooo
+    method: POST
+    schedule: "0 5 * * *"
+    scope: per_workspace_timezone
+  - name: cockpit-daily-digest
+    target: http
+    path: /api/agents/jobs/cockpit/daily-digest
+    method: POST
+    schedule: "0 8 * * 1-5"
+    scope: per_workspace_timezone
+  - name: cockpit-weekly-aging
+    target: http
+    path: /api/agents/jobs/cockpit/weekly-aging
+    method: POST
+    schedule: "15 8 * * 1"
+    scope: per_workspace_timezone
+  - name: whats-new-digest
+    target: http
+    path: /api/agents/whats-new/digest
+    method: POST
+    schedule: "30 8 * * 1-5"
+    scope: per_workspace_timezone
+  - name: loop-closure-scan
+    target: http
+    path: /api/agents/jobs/loop-closure/scan
+    method: POST
+    schedule: "10 7 * * 1-5"
+    scope: per_workspace_timezone
+  - name: eos-ingest
+    target: http
+    path: /api/agents/ingest/eos
+    method: POST
+    schedule: "0 3 * * 1"
+    scope: per_workspace_timezone
+    module: eos
+  - name: eos-scorecard-sales
+    target: http
+    path: /api/agents/scorecard/sync-sales
+    method: POST
+    schedule: "30 4 * * 1"
+    scope: per_workspace_timezone
+    module: eos
+  - name: eos-l10-close-abandoned
+    target: http
+    path: /api/agents/eos/l10/close-abandoned-sessions
+    method: POST
+    schedule: "0 1 * * *"
+    scope: per_workspace_timezone
+    module: eos
+  - name: transcript-sync
+    target: http
+    path: /api/ingest/scheduler/sync
+    method: POST
+    schedule: "*/15 * * * *"
+    scope: platform_fanout
+  - name: eos-l10-summary-emails
+    target: http
+    path: /api/agents/eos/l10/summary-emails
+    method: POST
+    schedule: "*/15 * * * *"
+    scope: platform_fanout
+    module: eos
+  - name: scheduled-tasks-tick
+    target: http
+    path: /api/agents/scheduled-tasks/tick
+    method: POST
+    schedule: "*/5 * * * *"
+    scope: platform_fanout
+  - name: fathom-sync
+    target: http
+    path: /api/agents/fathom/sync
+    method: POST
+    schedule: "0 */2 * * *"
+    scope: platform_fanout
+  - name: ccs-sweep
+    target: http
+    path: /api/agents/jobs/ccs/sweep
+    method: POST
+    schedule: "*/30 * * * *"
+    scope: platform_fanout
+  - name: cockpit-recompute-states
+    target: http
+    path: /api/agents/jobs/cockpit/recompute-states
+    method: POST
+    schedule: "0 */2 * * *"
+    scope: platform_fanout
+  - name: cockpit-stage-lag
+    target: http
+    path: /api/agents/jobs/cockpit/stage-lag
+    method: POST
+    schedule: "30 */2 * * *"
+    scope: platform_fanout
+  - name: cockpit-sow-sent
+    target: http
+    path: /api/agents/jobs/cockpit/sow-sent
+    method: POST
+    schedule: "45 */2 * * *"
+    scope: platform_fanout

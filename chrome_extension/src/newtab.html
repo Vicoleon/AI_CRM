@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>New Tab</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="page">
+    <main class="wrap">
+      <p class="greeting" id="greeting"></p>
+      <form class="search" id="search" role="search">
+        <input
+          id="q"
+          name="q"
+          type="search"
+          placeholder="Search the web"
+          autocomplete="off"
+          aria-label="Search the web"
+        />
+        <button class="btn search-ask" id="ask" type="button" hidden>Ask Cubie</button>
+      </form>
+      <div class="cubie" id="cubie" aria-live="polite"></div>
+    </main>
+    <script type="module" src="newtab.js"></script>
+  </body>
+</html>

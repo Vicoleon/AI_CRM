@@ -1,0 +1,70 @@
+# Cubie — Slack app manifest
+#
+# Paste at https://api.slack.com/apps → Create New App → "From a manifest".
+# Scopes mirror backend/routers/slack.py (BOT_SCOPES + USER_SCOPES). Keep them
+# in sync: changing scopes in code requires re-installing the app so the new
+# grants take effect.
+#
+# Create one app from this manifest for each client workspace. Replace
+# <CUBIE_PUBLIC_HOST> with Cubie's public HTTPS hostname. Save that app's
+# app ID and Slack team exclusively for that workspace; neither ID can be
+# shared with a second Cubie workspace. Existing Phase 1 users must reconnect.
+# Save that app's client ID in its workspace Slack connector, and save its
+# client and signing secrets through the workspace-bound secret store.
+# The connector redirect URI must match oauth_config.redirect_urls below.
+
+display_information:
+  name: Cubie
+  description: Cubie by RubikSoft
+  background_color: "#1f2937"
+
+features:
+  bot_user:
+    display_name: Cubie
+    always_online: true
+  slash_commands:
+    - command: /todo
+      description: Add an EOS to-do or a personal promise from Slack.
+      url: https://<CUBIE_PUBLIC_HOST>/api/slack/commands
+      should_escape: false
+    - command: /ids
+      description: Raise an issue for your team's IDS list.
+      url: https://<CUBIE_PUBLIC_HOST>/api/slack/commands
+      should_escape: false
+
+oauth_config:
+  redirect_urls:
+    - https://<CUBIE_PUBLIC_HOST>/api/slack/callback
+  scopes:
+    # User token (xoxp-) — read-side signals + chat catch-up (UC-15 / UC-17.3)
+    user:
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - search:read
+      - users:read
+    # Bot token (xoxb-) — outbound delivery + channel/user reads
+    bot:
+      - channels:history
+      - channels:read
+      - commands          # /todo and /ids
+      - groups:read
+      - im:read
+      - im:write          # open a DM channel with a rep (conversations.open)
+      - mpim:read
+      - users:read
+      - users:read.email  # map a rep's company email -> Slack user ID
+      - chat:write        # post the AI-Priorities DM as the Cubie bot
+
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://<CUBIE_PUBLIC_HOST>/api/slack/interactivity
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

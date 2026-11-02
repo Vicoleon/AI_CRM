@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cubie for Chrome privacy policy</title>
+    <!-- Public on purpose (no sign-in): the Chrome Web Store listing links here
+         and its reviewers must be able to read it. Served from frontend/public
+         by the SPA's static handler. Keep it in step with the extension
+         (chrome_extension/) and docs/chrome_extension/web_store.md. -->
+    <style>
+      body { margin: 0; background: #faf9f7; color: #1f1e1c; font: 16px/1.6 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+      main { max-width: 680px; margin: 0 auto; padding: 48px 16px 64px; }
+      h1 { font-size: 26px; font-weight: 600; margin: 0 0 4px; }
+      h2 { font-size: 18px; font-weight: 600; margin: 32px 0 8px; }
+      p, li { color: #3d3c39; }
+      .muted { color: #6b6a65; font-size: 14px; }
+      a { color: #7C3AED; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Cubie for Chrome privacy policy</h1>
+      <p class="muted">Cubie by RubikSoft. Effective October 28, 2026.</p>
+
+      <p>
+        Cubie for Chrome is a Chrome extension for people whose company uses Cubie, RubikSoft's
+        work app. It shows a person their own overdue commitments and today's priorities from
+        Cubie on Chrome's new tab page, with links back to Cubie. It is published privately, and
+        only people with an account at a company that uses Cubie can install it.
+      </p>
+
+      <h2>What it handles</h2>
+      <ul>
+        <li>
+          <strong>A connection key.</strong> When a person connects the extension from Cubie, Cubie
+          creates a random key for that browser. The extension keeps it in Chrome's extension
+          storage on that computer and sends it only to Cubie. Cubie stores only a fingerprint of
+          the key, not the key itself.
+        </li>
+        <li>
+          <strong>The person's own work items and first name</strong>, as Cubie sends them: their
+          overdue or due-today to-dos and commitments, and the priorities Cubie prepared for them
+          that morning. The extension keeps the latest copy in the same storage so a new tab opens
+          instantly.
+        </li>
+        <li>
+          <strong>Display preferences</strong> (how much the new tab shows, whether the toolbar
+          number is on). These are kept in Chrome's synced storage for that person.
+        </li>
+      </ul>
+
+      <h2>What it does not do</h2>
+      <ul>
+        <li>It does not read the person's email, browsing history or the content of other websites.</li>
+        <li>It has no analytics, advertising or tracking, and sends nothing to any third party.</li>
+        <li>Its data is not sold, not shared, and not used for any purpose other than showing the person their own work.</li>
+        <li>It talks to one address only: the Cubie address of the person's company.</li>
+      </ul>
+
+      <h2>Keeping and removing data</h2>
+      <p>
+        A connection key stops working after 90 days, when the person disconnects the browser (in
+        the extension's options or in Cubie under Settings → General), or when the person leaves
+        the company. Disconnecting also clears the copy of their items from the browser. Removing
+        the extension deletes everything it stored on that computer.
+      </p>
+
+      <h2>Questions</h2>
+      <p>
+        Ask your company's Cubie administrator, or write to RubikSoft, the maker of Cubie, at
+        <a href="mailto:jose.leon@rubik-soft.com">jose.leon@rubik-soft.com</a>
+        (<a href="https://www.rubik-soft.com">rubik-soft.com</a>).
+      </p>
+    </main>
+  </body>
+</html>
