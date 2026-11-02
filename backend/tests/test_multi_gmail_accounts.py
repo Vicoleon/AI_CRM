@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -33,6 +34,7 @@ from rubik_core.tenancy.gmail_accounts import (
     complete_connection,
     disconnect_account,
     get_account_credentials,
+    gmail_oauth_available,
     list_accounts,
     mark_account_reauth_required,
     multi_gmail_enabled,
@@ -163,6 +165,164 @@ def test_workspace_admin_option_is_off_until_enabled(gmail_setup):
     _enabled()
     assert multi_gmail_enabled() is True
     assert SQLUserRegistry().get_workspace_settings()["multi_gmail_enabled"] is True
+
+
+def test_missing_platform_oauth_setup_is_visible_before_google(
+    gmail_setup, monkeypatch
+):
+    _enabled()
+    assert gmail_oauth_available() is True
+    monkeypatch.setattr(settings, "GOOGLE_GMAIL_OAUTH_CLIENT_ID", "")
+    assert gmail_oauth_available() is False
+    with pytest.raises(gmail_accounts_module.GmailOAuthUnavailable):
+        begin_connection(OWNER, _BROWSER)
+
+
+def test_admin_off_pauses_extra_mail_without_erasing_owner_connection(
+    gmail_setup, monkeypatch
+):
+    from rubik_core.priorities import PrioritiesConfig
+    from rubik_core.priorities.agents.gmail_agent import GmailChannelAgent
+
+    _enabled()
+    _google(monkeypatch)
+    account = complete_connection(
+        _state(begin_connection(OWNER, _BROWSER)), "code", _BROWSER
+    )
+    SQLUserRegistry().update_workspace_settings({"multi_gmail_enabled": False})
+    assert list_accounts(OWNER)[0]["id"] == account["id"]
+    with pytest.raises(PermissionError, match="disabled"):
+        get_account_credentials(OWNER, account["id"])
+
+    called_accounts = []
+
+    class GmailClient:
+        def __init__(self, *, user_email, account_id=None):
+            called_accounts.append(account_id)
+
+        def search_threads(self, *, query, max_results):
+            return []
+
+    monkeypatch.setattr("rubik_core.tools.gmail.GmailClient", GmailClient)
+    monkeypatch.setattr(
+        "rubik_core.priorities.agents._google_auth.require_live_client",
+        lambda *_args, **_kwargs: None,
+    )
+    agent = GmailChannelAgent(user_email=OWNER, config=PrioritiesConfig.default())
+    agent.fetch_signals()
+    assert called_accounts == [None]
+
+    _enabled()
+    assert get_account_credentials(OWNER, account["id"])[1] == MAILBOX
+    assert disconnect_account(OWNER, account["id"]) is True
+
+
+def test_admin_off_blocks_existing_gmail_client_before_every_google_operation(
+    gmail_setup, monkeypatch
+):
+    from backend.services.gmail_service import GmailService
+    from rubik_core.tools import _workspace_auth, gmail
+
+    _enabled()
+    _google(monkeypatch)
+    account = complete_connection(
+        _state(begin_connection(OWNER, _BROWSER)), "code", _BROWSER
+    )
+    service = MagicMock()
+    service.users.return_value.threads.return_value.list.return_value.execute.return_value = {
+        "threads": []
+    }
+    monkeypatch.setattr(_workspace_auth, "safe_refresh", lambda _creds: None)
+    monkeypatch.setattr(gmail, "build", lambda *_args, **_kwargs: service)
+    client = gmail.GmailClient(OWNER, account_id=account["id"])
+    assert client.search_threads() == []
+
+    SQLUserRegistry().update_workspace_settings({"multi_gmail_enabled": False})
+    calls_before = service.users.call_count
+    operations = (
+        lambda: client.search_threads(),
+        lambda: client.list_thread_page(),
+        lambda: client._hydrate_threads(["thread-id"]),
+        lambda: client.get_thread("thread-id"),
+        client.get_signature,
+        lambda: client.create_draft(
+            to=["recipient@example.com"], subject="Draft", body_markdown="Hello"
+        ),
+    )
+    for operation in operations:
+        with pytest.raises(PermissionError, match="disabled"):
+            operation()
+    assert service.users.call_count == calls_before
+    email_service = GmailService.__new__(GmailService)
+    email_service._client = client
+    with pytest.raises(PermissionError, match="disabled"):
+        email_service.mark_as_read("message-id")
+    service.users.return_value.messages.return_value.modify.assert_not_called()
+
+    # A signature read that started before the toggle cannot return its result.
+    _enabled()
+    service.users.return_value.settings.return_value.sendAs.return_value.list.return_value.execute.side_effect = (
+        lambda: (
+            SQLUserRegistry().update_workspace_settings({"multi_gmail_enabled": False})
+            or {"sendAs": [{"isPrimary": True, "signature": "private signature"}]}
+        )
+    )
+    with pytest.raises(PermissionError, match="disabled"):
+        client.get_signature()
+
+    # An admin can also disable access while a hydration batch is in flight.
+    _enabled()
+    service.users.return_value.threads.return_value.list.return_value.execute.return_value = {
+        "threads": [{"id": "thread-id"}]
+    }
+    service.new_batch_http_request.return_value.execute.side_effect = lambda: (
+        SQLUserRegistry().update_workspace_settings({"multi_gmail_enabled": False})
+    )
+    with pytest.raises(PermissionError, match="disabled"):
+        client.search_threads()
+    service.users.return_value.threads.return_value.get.return_value.execute.assert_not_called()
+
+    _enabled()
+    mark_account_reauth_required(
+        OWNER, account["id"], failed_refresh_token="refresh-secret"
+    )
+    with pytest.raises(PermissionError, match="unavailable"):
+        client.search_threads()
+
+
+def test_revoked_extra_mailbox_is_omitted_but_work_mail_still_runs(
+    gmail_setup, monkeypatch
+):
+    from rubik_core.priorities import PrioritiesConfig
+    from rubik_core.priorities.agents.gmail_agent import GmailChannelAgent
+
+    _enabled()
+    _google(monkeypatch)
+    account = complete_connection(
+        _state(begin_connection(OWNER, _BROWSER)), "code", _BROWSER
+    )
+    mark_account_reauth_required(
+        OWNER, account["id"], failed_refresh_token="refresh-secret"
+    )
+    assert list_accounts(OWNER)[0]["status"] == "reauth_required"
+
+    called_accounts = []
+
+    class GmailClient:
+        def __init__(self, *, user_email, account_id=None):
+            called_accounts.append(account_id)
+
+        def search_threads(self, *, query, max_results):
+            return []
+
+    monkeypatch.setattr("rubik_core.tools.gmail.GmailClient", GmailClient)
+    monkeypatch.setattr(
+        "rubik_core.priorities.agents._google_auth.require_live_client",
+        lambda *_args, **_kwargs: None,
+    )
+    agent = GmailChannelAgent(user_email=OWNER, config=PrioritiesConfig.default())
+    agent.fetch_signals()
+    assert called_accounts == [None]
 
 
 def test_connection_requires_browser_cookie_and_state_is_one_use(
@@ -611,6 +771,21 @@ def test_http_callback_requires_same_browser_cookie(gmail_setup, monkeypatch):
         client = TestClient(app)
         settings_response = client.get("/api/email/accounts")
         assert settings_response.status_code == 200
+        assert settings_response.json()["oauth_available"] is True
+        monkeypatch.setattr(settings, "GOOGLE_GMAIL_OAUTH_CLIENT_ID", "")
+        unavailable = client.get("/api/email/accounts")
+        assert unavailable.status_code == 200
+        assert unavailable.json()["oauth_available"] is False
+        blocked = client.post(
+            "/api/email/accounts/connect",
+            json={"fingerprint": settings_response.json()["ai_provider_fingerprint"]},
+        )
+        assert blocked.status_code == 503
+        monkeypatch.setattr(
+            settings,
+            "GOOGLE_GMAIL_OAUTH_CLIENT_ID",
+            "gmail-client.apps.googleusercontent.com",
+        )
         assert client.post("/api/email/accounts/connect").status_code == 422
         started = client.post(
             "/api/email/accounts/connect",

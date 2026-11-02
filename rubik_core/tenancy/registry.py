@@ -11,6 +11,7 @@ from weakref import WeakValueDictionary
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.pool import NullPool
 
 from rubik_core.config import settings
 from rubik_core.control.models import WorkspaceConnectionSpec
@@ -90,7 +91,11 @@ def _local_url(slug: str) -> str:
 
 
 def _cloud_engine(
-    slug: str, spec: WorkspaceConnectionSpec, *, registered: bool
+    slug: str,
+    spec: WorkspaceConnectionSpec,
+    *,
+    registered: bool,
+    advisory: bool = False,
 ) -> Engine:
     from google.cloud.sql.connector import IPTypes
 
@@ -143,14 +148,21 @@ def _cloud_engine(
                 ip_type=ip_type,
             )
 
+    pool_options = (
+        {"poolclass": NullPool}
+        if advisory
+        else {
+            "pool_size": 2,
+            "max_overflow": 2,
+            "pool_timeout": 30,
+            "pool_recycle": 1800,
+        }
+    )
     engine = create_engine(
         "postgresql+pg8000://",
         creator=connect,
-        pool_size=2,
-        max_overflow=2,
-        pool_timeout=30,
-        pool_recycle=1800,
         pool_pre_ping=True,
+        **pool_options,
     )
 
     @event.listens_for(engine, "engine_disposed")
@@ -207,6 +219,38 @@ def engine_for(slug: str) -> Engine:
     # publishing its pool. Only this slug waits through control/secret I/O.
     with workspace_lock:
         return _resolve_engine(slug)
+
+
+def advisory_engine_for(slug: str) -> Engine:
+    """Create a caller-owned lock connection pool for the active tenant DB.
+
+    It uses the same control-bound Cloud SQL identity as engine_for, but a
+    NullPool so a long Vertex mutation never occupies a tenant data-pool slot.
+    The caller must dispose the returned engine after releasing its lock.
+    """
+    slug = _canonical_slug(slug)
+    _assert_support_target(slug)
+    if slug == "test" and "pytest" in sys.modules:
+        return _sqlite_engine(settings.DATABASE_URL)
+    workspace = get_workspace(slug)
+    if workspace is None or workspace.status != "active":
+        raise ValueError(f"Workspace {slug!r} is unknown or inactive")
+    if settings.CLOUDSQL_CONNECTION_NAME or is_production_runtime():
+        _cloud_dependencies()
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                workspace.db_name,
+                workspace.db_user,
+                workspace.db_password_secret_ref,
+            )
+        ):
+            raise ValueError("Workspace database identity is incomplete")
+        spec = WorkspaceConnectionSpec(
+            workspace.db_name, workspace.db_user, workspace.db_password_secret_ref
+        )
+        return _cloud_engine(slug, spec, registered=True, advisory=True)
+    return _sqlite_engine(_local_url(slug))
 
 
 def _resolve_engine(slug: str) -> Engine:

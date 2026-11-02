@@ -192,6 +192,11 @@ async def trigger_meet_sync(
             status_code=403,
             detail="Only administrators can trigger global transcript synchronization.",
         )
+    if settings.APP_MODE == AppMode.DEV_MOCK_AUTH:
+        raise HTTPException(
+            status_code=403,
+            detail="Global transcript synchronization is unavailable in local preview.",
+        )
 
     # Run sync for last 30 days when manually triggered — on the cubie-worker
     # Cloud Run Job (#9): the all-users sweep runs for minutes, which a
@@ -239,6 +244,11 @@ async def scheduler_sync(
         )
         raise HTTPException(
             status_code=403, detail="Unauthorized: Scheduler key missing or invalid."
+        )
+    if settings.APP_MODE == AppMode.DEV_MOCK_AUTH:
+        raise HTTPException(
+            status_code=403,
+            detail="Global transcript synchronization is unavailable in local preview.",
         )
 
     # Nightly sync: 7 days lookback — on the cubie-worker Cloud Run Job (#9),

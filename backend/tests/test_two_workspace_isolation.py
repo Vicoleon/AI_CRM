@@ -75,10 +75,11 @@ def test_setup_only_upgrades_existing_workspace_head(local_pair, tmp_path):
     shutil.copytree(data_dir, clone)
     old_workspace = clone / "workspace-dbs/rubiksoft.db"
     with sqlite3.connect(old_workspace) as connection:
-        connection.execute("DROP TABLE gmail_oauth_attempts")
-        connection.execute("DROP TABLE gmail_accounts")
         connection.execute(
-            "UPDATE alembic_version SET version_num = '0004_extension_hosted_domain'"
+            "ALTER TABLE cloud_vector_updates DROP COLUMN managed_applied"
+        )
+        connection.execute(
+            "UPDATE alembic_version SET version_num = '0009_cloud_vector_events'"
         )
 
     env = {
@@ -100,9 +101,12 @@ def test_setup_only_upgrades_existing_workspace_head(local_pair, tmp_path):
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert _fetch(old_workspace, "SELECT version_num FROM alembic_version") == [
-        ("0005_gmail_accounts",)
+        ("0010_cloud_vector_managed",)
     ]
-    assert _fetch(old_workspace, "SELECT count(*) FROM gmail_accounts") == [(0,)]
+    assert "managed_applied" in {
+        row[1]
+        for row in _fetch(old_workspace, "PRAGMA table_info(cloud_vector_updates)")
+    }
 
 
 def test_mock_email_domain_selects_only_its_workspace(local_pair):

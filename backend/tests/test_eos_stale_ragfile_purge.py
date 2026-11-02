@@ -95,6 +95,11 @@ def vertex(monkeypatch):
         def import_gcs_uri_to_corpus(self, gcs_uri):
             rec.imported.append(gcs_uri)
 
+        def upload_and_import(self, local_path):
+            uri = self.upload_to_gcs(local_path)
+            self.import_gcs_uri_to_corpus(uri)
+            return uri
+
     monkeypatch.setattr(vertex_rag_module, "VertexRagAdapter", StubAdapter)
     yield rec
     with control_session() as session:

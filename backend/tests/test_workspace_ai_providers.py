@@ -1295,7 +1295,7 @@ def test_embedding_admin_prepare_and_activate_are_distinct_audited_steps(
     monkeypatch.setattr(
         embedding_index,
         "embedding_index_status",
-        lambda: {"active": {"version": "legacy"}, "candidate": None},
+        lambda *, corpus: {"active": {"version": "legacy"}, "candidate": None},
     )
     monkeypatch.setattr(ai_providers, "SessionLocal", lambda: nullcontext(object()))
     monkeypatch.setattr(
@@ -1305,7 +1305,10 @@ def test_embedding_admin_prepare_and_activate_are_distinct_audited_steps(
     )
     admin = SimpleNamespace(email="admin@example.com")
 
-    assert ai_providers.get_embedding_index(admin)["active"]["version"] == "legacy"
+    assert (
+        ai_providers.get_embedding_index("default", admin)["active"]["version"]
+        == "legacy"
+    )
     prepared = ai_providers.prepare_embedding_index_route(
         ai_providers.EmbeddingPrepareRequest(
             provider="openai", model="text-embedding-3-small"

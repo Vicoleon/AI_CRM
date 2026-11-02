@@ -249,7 +249,7 @@ export const tours: readonly PageTour[] = [
             {
                 id: 'welcome',
                 title: 'Ask Cubie anything',
-                body: 'Ask a question in plain language and Cubie finds the answer in company documents, your email and calendar, meeting transcripts, HubSpot and more. Your workspace admin chooses a compatible Chat model. Emails it writes land in your Gmail Drafts for you to send.',
+                body: 'Ask Cubie about company documents you can access, email, calendar, meetings, HubSpot and more. Your admin chooses a compatible Chat model. Emails it writes land in your Gmail Drafts for you to send.',
                 target: 'chat-header',
                 placement: 'bottom',
             },
@@ -317,6 +317,24 @@ export const tours: readonly PageTour[] = [
                 id: 'web',
                 title: 'Web research has its own choice',
                 body: 'Public web research uses a separate compatible Google model. If a selected provider is unavailable, Chat shows an error so your admin can check it.',
+            },
+        ],
+    },
+    {
+        id: 'chat.new.scoped-knowledge',
+        kind: 'new',
+        routes: ['/chat'],
+        title: 'Knowledge stays within your access',
+        helpTopic: 'chat',
+        requires: 'copilot',
+        since: '2026-11-02',
+        steps: [
+            {
+                id: 'scope',
+                title: 'Answers from your team’s documents',
+                body: 'Cubie searches the knowledge collections you can access. If they are unavailable, it tells you instead of searching a broader shared collection.',
+                target: 'chat-header',
+                placement: 'bottom',
             },
         ],
     },

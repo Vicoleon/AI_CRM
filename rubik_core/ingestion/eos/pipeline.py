@@ -150,9 +150,8 @@ def _purge_stale_ragfiles(
     a re-ingest a replace; multiple matches (duplicates accumulated before
     this fix) are all removed, so the corpus self-heals over time.
 
-    Best-effort per file: a failed delete is logged and the import still
-    proceeds (the fresh content wins retrieval-wise; the next re-ingest
-    retries the purge).
+    Managed-only cleanup is best-effort. A selected cloud vector route must
+    settle a failed delete before a replacement can be imported.
     """
     stale = index.pop(filename, [])
     if not stale:
@@ -161,21 +160,36 @@ def _purge_stale_ragfiles(
 
     from rubik_core.ai_providers.cloud_rag_bridge import (
         begin_cloud_source_update,
-        fail_cloud_source_update,
+        cloud_source_mutation_lock,
+        confirm_managed_source_update,
         finish_cloud_source_update,
+        settle_failed_managed_update,
     )
     from rubik_core.ai_providers.embedding_index import cloud_index_versions
     from rubik_core.tenancy.corpora import assert_own_rag_file
 
-    for name, uri in stale:
+    def purge_one(name: str, uri: str) -> None:
         update = None
         try:
             if corpus_name is None:
                 raise ValueError("A bound corpus is required")
             assert_own_rag_file(name, corpus_name)
             update = begin_cloud_source_update(corpus_name, uri, "delete")
-            rag.delete_file(name=name)
-            finish_cloud_source_update(corpus_name, uri, "delete", update)
+            try:
+                rag.delete_file(name=name)
+            except Exception:
+                if update is None:
+                    raise
+                settled = settle_failed_managed_update(
+                    corpus_name, uri, "delete", update
+                )
+                if not settled:
+                    raise RuntimeError(
+                        "Stale RAG file remains published after deletion failed"
+                    ) from None
+            else:
+                confirm_managed_source_update(update)
+                finish_cloud_source_update(corpus_name, uri, "delete", update)
             logger.info(
                 "[eos-ingest] purged stale ragFile %s (%s) from %s",
                 name,
@@ -183,7 +197,6 @@ def _purge_stale_ragfiles(
                 corpus_name,
             )
         except Exception:  # noqa: BLE001
-            fail_cloud_source_update(update)
             if corpus_name is not None and any(cloud_index_versions(corpus_name)):
                 raise
             logger.warning(
@@ -194,6 +207,13 @@ def _purge_stale_ragfiles(
                 filename,
                 exc_info=True,
             )
+
+    for name, uri in stale:
+        if corpus_name is None:
+            purge_one(name, uri)
+        else:
+            with cloud_source_mutation_lock(corpus_name, uri):
+                purge_one(name, uri)
 
 
 def ingest_docs(
@@ -246,9 +266,7 @@ def ingest_docs(
         adapter = VertexRagAdapter()
 
         def _import_one(local_path: Path) -> str:
-            gcs_uri = adapter.upload_to_gcs(local_path)
-            adapter.import_gcs_uri_to_corpus(gcs_uri)
-            return gcs_uri
+            return adapter.upload_and_import(local_path)
 
         corpus_name = adapter.corpus_id
 

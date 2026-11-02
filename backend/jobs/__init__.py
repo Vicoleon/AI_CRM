@@ -122,6 +122,12 @@ WORKER_JOBS: dict[str, WorkerJob] = {
             "someone@example.com",
         ),
     ),
+    "cloud-embedding-rebuild": WorkerJob(
+        module="backend.jobs.cloud_embedding_rebuild_job",
+        summary="Build one workspace knowledge collection's client-owned vector index.",
+        dispatched_from="backend/routers/ai_providers.py",
+        example_args=("--run-id", "<rebuild id>"),
+    ),
     "eos-reingest": WorkerJob(
         module="backend.jobs.eos_reingest_job",
         summary="Re-ingest one EOS source after a debounced edit burst.",

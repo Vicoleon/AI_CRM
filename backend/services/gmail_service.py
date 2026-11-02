@@ -211,8 +211,9 @@ class GmailService:
         """
         from googleapiclient.errors import HttpError
 
+        self._client._assert_extra_account_access()
         try:
-            return (
+            result = (
                 self._client.service.users()
                 .messages()
                 .modify(
@@ -222,6 +223,8 @@ class GmailService:
                 )
                 .execute()
             )
+            self._client._assert_extra_account_access()
+            return result
         except HttpError as e:
             if e.resp.status in (401, 403):
                 raise PermissionError(

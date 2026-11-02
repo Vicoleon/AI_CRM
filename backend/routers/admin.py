@@ -323,36 +323,39 @@ async def sync_rag(
         )
 
     from rubik_core.adapters.vertex_rag import VertexRagAdapter
+    from rubik_core.rag.manager import RagManager
+    from rubik_core.tenancy.corpora import assert_own_rag_file
+    from rubik_core.tenancy.storage import assert_own_uri
 
     adapter = VertexRagAdapter()
+    manager = RagManager()
 
     if type(adapter).__name__ != "VertexRagAdapter":
         raise HTTPException(status_code=400, detail="VertexRagAdapter is required")
 
     from vertexai.preview import rag
 
-    from rubik_core.database.models import Asset
+    from rubik_core.database.models import Asset, AssetVersion
 
-    # Get all indexed URIs from Vertex RAG
-    indexed_uris = set()
-    try:
-        rag_files = list(rag.list_files(corpus_name=adapter.corpus_id))
-        for f in rag_files:
-            uris = (
-                getattr(f.gcs_source, "uris", [])
-                if hasattr(f, "gcs_source") and f.gcs_source
-                else []
-            )
-            for u in uris:
-                from rubik_core.tenancy.storage import assert_own_uri
+    indexed_by_corpus: dict[str, set[str]] = {}
 
-                try:
-                    indexed_uris.add(assert_own_uri(u))
-                except ValueError:
-                    logger.warning("sync-rag skipped a source outside the workspace")
-    except Exception as e:
-        logger.error(f"Failed to list RAG files: {e}")
-        raise HTTPException(status_code=500, detail="Failed to list RAG files")
+    def indexed_uris(corpus: str) -> set[str]:
+        if corpus not in indexed_by_corpus:
+            try:
+                uris: set[str] = set()
+                for file in rag.list_files(corpus_name=corpus):
+                    assert_own_rag_file(file.name, corpus)
+                    sources = getattr(getattr(file, "gcs_source", None), "uris", None)
+                    if not sources:
+                        raise ValueError("RAG file has no source")
+                    uris.update(assert_own_uri(uri) for uri in sources)
+                indexed_by_corpus[corpus] = uris
+            except Exception as exc:
+                logger.error("Failed to list RAG files in bound corpus: %s", exc)
+                raise HTTPException(
+                    status_code=500, detail="Failed to list RAG files"
+                ) from exc
+        return indexed_by_corpus[corpus]
 
     assets = db.query(Asset).filter(Asset.status == "approved").all()
 
@@ -362,11 +365,18 @@ async def sync_rag(
 
     for asset in assets:
         source_path = asset.source_path or ""
+        try:
+            target_corpus = manager.corpus_for_asset(
+                asset.department, bool(asset.is_company_wide)
+            )
+        except Exception:
+            logger.warning("sync-rag skipped asset without a bound audience")
+            failed_count += 1
+            continue
+        known_uris = indexed_uris(target_corpus)
 
         if not source_path.startswith("gs://"):
             # Local file that hasn't been uploaded to GCS yet
-            from rubik_core.tenancy.storage import assert_own_uri
-
             try:
                 local_path = Path(assert_own_uri(source_path))
             except ValueError:
@@ -377,9 +387,19 @@ async def sync_rag(
             if local_path.exists():
                 logger.info(f"Uploading local asset {asset.doc_id} to GCS...")
                 try:
-                    gcs_uri = adapter.upload_to_gcs(local_path)
+                    gcs_uri = adapter.upload_and_import(local_path, target_corpus)
                     asset.source_path = gcs_uri
-                    adapter.import_gcs_uri_to_corpus(gcs_uri)
+                    version = (
+                        db.query(AssetVersion)
+                        .filter(
+                            AssetVersion.doc_id == asset.doc_id,
+                            AssetVersion.version_number == asset.current_version,
+                        )
+                        .one_or_none()
+                    )
+                    if version is not None:
+                        version.source_path = gcs_uri
+                    known_uris.add(gcs_uri)
 
                     uploaded_count += 1
                     imported_count += 1
@@ -393,8 +413,6 @@ async def sync_rag(
                 failed_count += 1
         else:
             # GCS file, check if it's imported in Vertex RAG
-            from rubik_core.tenancy.storage import assert_own_uri
-
             try:
                 assert_own_uri(source_path)
             except ValueError:
@@ -402,12 +420,13 @@ async def sync_rag(
                 asset.status = "failed"
                 failed_count += 1
                 continue
-            if source_path not in indexed_uris:
+            if source_path not in known_uris:
                 logger.info(
                     f"Asset {asset.doc_id} in GCS but missing in RAG. Importing..."
                 )
                 try:
-                    adapter.import_gcs_uri_to_corpus(source_path)
+                    adapter.import_gcs_uri_to_corpus(source_path, target_corpus)
+                    known_uris.add(source_path)
                     imported_count += 1
                 except Exception as e:
                     logger.error(

@@ -89,12 +89,9 @@ class IngestionProcessor:
             raw_doc.metadata.update(manual_metadata)
 
         try:
-            # 1. Upload raw file to GCS
-            gcs_uri = self.vector_store.upload_to_gcs(file_path)
-
-            # 2. Import into the RAG Corpus (async job starts on Vertex side)
-            self.vector_store.import_gcs_uri_to_corpus(
-                gcs_uri, target_corpus_id=target_corpus_id
+            # Hold one source lock across GCS overwrite and managed import.
+            gcs_uri = self.vector_store.upload_and_import(
+                file_path, target_corpus_id=target_corpus_id
             )
 
             logger.info(
@@ -107,6 +104,7 @@ class IngestionProcessor:
             return {
                 "result": UpsertResult(success=True, count=1),
                 "doc_id": raw_doc.doc_id,
+                "gcs_uri": gcs_uri,
             }
         except Exception as e:
             logger.error(f"RAG ingestion failed for {file_path}: {e}")

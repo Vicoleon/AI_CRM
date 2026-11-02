@@ -30,11 +30,18 @@ from rubik_core.adapters.base import (
 )
 from rubik_core.ai_providers.cloud_rag_bridge import (
     begin_cloud_source_update,
-    fail_cloud_source_update,
+    cloud_source_mutation_lock,
+    confirm_managed_source_update,
     finish_cloud_source_update,
     query_cloud_resource,
+    settle_failed_managed_update,
+    source_is_published,
+    source_referencing_corpora,
 )
+from rubik_core.ai_providers.cloud_vector_index import CloudVectorIndexError
+from rubik_core.ai_providers.embedding_index import cloud_corpus_key
 from rubik_core.config import settings
+from rubik_core.rag.import_result import require_one_imported
 from rubik_core.tenancy.corpora import (
     assert_own_rag_file,
     corpus_id,
@@ -103,11 +110,41 @@ class VertexRagAdapter(VectorStoreAdapter):
     def upload_to_gcs(self, local_path: Path) -> str:
         """Upload a local file to GCS and return its gs:// URI."""
         blob_name = object_name("rag", safe_upload_name(local_path.name))
+        gcs_uri = f"gs://{self.bucket_name}/{blob_name}"
+        with cloud_source_mutation_lock(self.corpus_id, gcs_uri):
+            self._require_exclusive_source(self.corpus_id, gcs_uri)
+            return self._upload_to_gcs_locked(local_path, blob_name, gcs_uri)
+
+    @staticmethod
+    def _require_exclusive_source(target: str, uri: str) -> None:
+        if source_referencing_corpora(target, uri) - {target}:
+            raise CloudVectorIndexError(
+                "RAG source is already published in another bound corpus"
+            )
+
+    def _upload_to_gcs_locked(
+        self, local_path: Path, blob_name: str, gcs_uri: str
+    ) -> str:
+        """Upload while a source lock is held by this method or its caller."""
         bucket = self.gcs_client.bucket(self.bucket_name)
         blob = bucket.blob(blob_name)
         blob.upload_from_filename(str(local_path))
-        gcs_uri = f"gs://{self.bucket_name}/{blob_name}"
         logger.info("Uploaded %s → %s", local_path, gcs_uri)
+        return gcs_uri
+
+    def upload_and_import(
+        self, local_path: Path, target_corpus_id: str | None = None
+    ) -> str:
+        """Hold one source lock from GCS overwrite through Vertex/vector sync."""
+        target = require_bound_corpus_id(target_corpus_id or self.corpus_id)
+        blob_name = object_name(
+            "rag", cloud_corpus_key(target), safe_upload_name(local_path.name)
+        )
+        gcs_uri = f"gs://{self.bucket_name}/{blob_name}"
+        with cloud_source_mutation_lock(target, gcs_uri):
+            self._require_exclusive_source(target, gcs_uri)
+            self._upload_to_gcs_locked(local_path, blob_name, gcs_uri)
+            self._import_gcs_uri_locked(gcs_uri, target)
         return gcs_uri
 
     def import_gcs_uri_to_corpus(
@@ -116,6 +153,12 @@ class VertexRagAdapter(VectorStoreAdapter):
         """Tell the RAG Corpus to import / re-index a GCS URI."""
         assert_own_uri(gcs_uri)
         target = require_bound_corpus_id(target_corpus_id or self.corpus_id)
+        with cloud_source_mutation_lock(target, gcs_uri):
+            self._import_gcs_uri_locked(gcs_uri, target)
+
+    def _import_gcs_uri_locked(self, gcs_uri: str, target: str) -> None:
+        """Import and synchronize one source while its mutation lock is held."""
+        self._require_exclusive_source(target, gcs_uri)
         source_update = begin_cloud_source_update(
             target, gcs_uri, "upsert", client=self.gcs_client
         )
@@ -131,12 +174,13 @@ class VertexRagAdapter(VectorStoreAdapter):
                     chunk_size=512,  # tokens per chunk (reduced from 1024 for tighter context)
                     chunk_overlap=50,  # small overlap is sufficient at 512 tokens
                 )
+                require_one_imported(response)
             except Exception as e:
                 err_str = str(e).lower()
                 if (
                     "other operations running" in err_str
                     or "operation ids are" in err_str
-                ):
+                ) and attempt < max_retries - 1:
                     delay = min(15, 3 * (attempt + 1))
                     logger.warning(
                         "RAG import for %s blocked by running operation. Retrying in %ds (attempt %d/%d)",
@@ -146,11 +190,21 @@ class VertexRagAdapter(VectorStoreAdapter):
                         max_retries,
                     )
                     time.sleep(delay)
-                else:
-                    fail_cloud_source_update(source_update)
-                    logger.error("Failed to import %s into RAG corpus: %s", gcs_uri, e)
-                    raise
+                    continue
+                if source_update is not None:
+                    try:
+                        settle_failed_managed_update(
+                            target,
+                            gcs_uri,
+                            "upsert",
+                            source_update,
+                            client=self.gcs_client,
+                        )
+                    except Exception:
+                        logger.warning("RAG import state needs vector repair")
+                raise RuntimeError("RAG import failed") from e
             logger.info("RAG import triggered for %s: %s", gcs_uri, response)
+            confirm_managed_source_update(source_update)
             finish_cloud_source_update(
                 target,
                 gcs_uri,
@@ -160,10 +214,7 @@ class VertexRagAdapter(VectorStoreAdapter):
             )
             return
 
-        fail_cloud_source_update(source_update)
-        raise RuntimeError(
-            f"Failed to import {gcs_uri} after {max_retries} retries due to concurrent operations."
-        )
+        raise RuntimeError("RAG import failed")
 
     # ─────────────────────────────────────────────────────────────
     # VectorStoreAdapter interface
@@ -311,6 +362,20 @@ class VertexRagAdapter(VectorStoreAdapter):
             logger.warning("Could not find file matching %s in RAG Corpus", source_path)
             return False
 
+        with cloud_source_mutation_lock(target_corpus, source_path):
+            return self._delete_verified_document(
+                target_corpus, target_file, source_path, also_delete_gcs
+            )
+
+    def _delete_verified_document(
+        self,
+        target_corpus: str,
+        target_file: str,
+        source_path: str,
+        also_delete_gcs: bool,
+    ) -> bool:
+        """Delete from Vertex and the selected vector space under source lock."""
+
         source_update = begin_cloud_source_update(
             target_corpus,
             source_path,
@@ -320,23 +385,43 @@ class VertexRagAdapter(VectorStoreAdapter):
 
         # Remove the verified RAG file first. A failed RAG delete leaves the
         # source object available for a later retry.
+        settled = False
         try:
             rag.delete_file(name=target_file)
             logger.info("Deleted %s from RAG Corpus", target_file)
+            confirm_managed_source_update(source_update)
         except Exception as e:
-            fail_cloud_source_update(source_update)
-            logger.error("Failed to delete %s from RAG Corpus: %s", source_path, e)
-            return False
+            if source_update is None:
+                logger.error("Failed to delete %s from RAG Corpus: %s", source_path, e)
+                return False
+            try:
+                settled = settle_failed_managed_update(
+                    target_corpus,
+                    source_path,
+                    "delete",
+                    source_update,
+                    client=self.gcs_client,
+                )
+            except Exception:
+                logger.warning("RAG delete state needs vector repair")
+                return False
+            if not settled:
+                return False
 
-        finish_cloud_source_update(
-            target_corpus,
-            source_path,
-            "delete",
-            source_update,
-            client=self.gcs_client,
-        )
+        if not settled:
+            finish_cloud_source_update(
+                target_corpus,
+                source_path,
+                "delete",
+                source_update,
+                client=self.gcs_client,
+            )
 
-        if also_delete_gcs and source_path.startswith("gs://"):
+        if (
+            also_delete_gcs
+            and source_path.startswith("gs://")
+            and not source_is_published(target_corpus, source_path)
+        ):
             try:
                 bucket_name, blob_name = source_path[len("gs://") :].split("/", 1)
                 blob = self.gcs_client.bucket(bucket_name).blob(blob_name)

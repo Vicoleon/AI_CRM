@@ -121,6 +121,50 @@ def test_search_knowledge_base_low_confidence_when_no_hits(monkeypatch):
     assert result["status"] == "low_confidence"
 
 
+@pytest.mark.parametrize("failure", ["missing", "unavailable"])
+def test_gcp_search_never_falls_back_to_unscoped_corpus(monkeypatch, failure):
+    """An absent or failed audience RAG cannot reveal a legacy default corpus."""
+    _uc1_env(monkeypatch)
+    from rubik_core.adk_agent.tools import AgentTools
+    from rubik_core.rag import NoUC1CorporaError, RagOperationError
+
+    error = (
+        NoUC1CorporaError("no audience corpus")
+        if failure == "missing"
+        else RagOperationError("audience corpus unavailable")
+    )
+    tools = AgentTools(user_email="u@acme.example")
+    with (
+        patch("rubik_core.adk_agent.tools._resolve_named_documents", return_value=[]),
+        patch("rubik_core.rag.rags_for_user_email", return_value=["companywide"]),
+        patch("rubik_core.rag.RagManager") as mgr_cls,
+        patch("rubik_core.adapters.vertex_rag.VertexRagAdapter") as legacy_cls,
+    ):
+        mgr_cls.return_value.query.side_effect = error
+        result = asyncio.run(tools.search_knowledge_base("restricted plan"))
+
+    assert result["status"] == "error"
+    legacy_cls.assert_not_called()
+
+
+def test_gcp_search_with_no_allowed_rags_does_not_use_default(monkeypatch):
+    _uc1_env(monkeypatch)
+    from rubik_core.adk_agent.tools import AgentTools
+
+    tools = AgentTools(user_email="u@acme.example")
+    with (
+        patch("rubik_core.adk_agent.tools._resolve_named_documents", return_value=[]),
+        patch("rubik_core.rag.rags_for_user_email", return_value=[]),
+        patch("rubik_core.rag.RagManager") as mgr_cls,
+        patch("rubik_core.adapters.vertex_rag.VertexRagAdapter") as legacy_cls,
+    ):
+        result = asyncio.run(tools.search_knowledge_base("restricted plan"))
+
+    assert result["status"] == "low_confidence"
+    mgr_cls.assert_not_called()
+    legacy_cls.assert_not_called()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _extract_citations_from_report — phantom-citation hardening + (rag) regex fix
 # ─────────────────────────────────────────────────────────────────────────────

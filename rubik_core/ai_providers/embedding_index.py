@@ -1,9 +1,8 @@
-"""Versioned workspace vector indexes with a validated local cutover.
+"""Versioned workspace vector indexes with a validated cutover.
 
-The active pointer lives in the control database. Rebuilds use a fresh Chroma
-collection; the source remains readable until all IDs, documents, metadata and
-vector dimensions have been verified. Vertex RAG manages its own embedding
-space and cannot be retargeted by this local Chroma mechanism.
+The active pointer lives in the control database. Local rebuilds use a fresh
+Chroma collection, while GCP rebuilds use a tenant Cloud SQL pgvector version.
+Both routes verify source content before switching the serving pointer.
 """
 
 from __future__ import annotations
@@ -215,9 +214,7 @@ def active_embedding_index(corpus: str = "default") -> EmbeddingIndexSpec:
 
 def _local_only() -> None:
     if settings.APP_MODE == AppMode.GCP:
-        raise IncompatibleModelRoute(
-            "Client embeddings require a separately provisioned vector index; Vertex RAG remains managed"
-        )
+        raise IncompatibleModelRoute("Local vector index is unavailable in GCP mode")
 
 
 def _workspace_dir() -> Path:

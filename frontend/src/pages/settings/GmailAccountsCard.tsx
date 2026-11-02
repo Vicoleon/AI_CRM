@@ -105,12 +105,15 @@ export const GmailAccountsCard: React.FC = () => {
                     </p>
                 </div>
                 {accountState.enabled && (
-                    <button type="button" onClick={connect} disabled={busy !== null} className="inline-flex items-center gap-2 rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50">
+                    <button type="button" onClick={connect} disabled={busy !== null || accountState.oauth_available === false} className="inline-flex items-center gap-2 rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50">
                         {busy === 'connect' ? <Loader2 size={15} className="animate-spin" /> : <Link2 size={15} />}
                         Connect another Gmail
                     </button>
                 )}
             </div>
+            {accountState.enabled && accountState.oauth_available === false && (
+                <p role="alert" className="mt-3 flex items-center gap-2 text-sm text-amber-700"><AlertCircle size={15} />Your admin needs to finish Google Gmail connection setup before you can add another account. Your work mailbox remains available.</p>
+            )}
             {error && <p role="alert" className="mt-3 flex items-center gap-2 text-sm text-red-700"><AlertCircle size={15} />{error}</p>}
             {connectionResult === 'connected' && <p role="status" className="mt-3 flex items-center gap-2 text-sm text-green-700"><CheckCircle2 size={15} />Gmail account connected.</p>}
             {connectionResult === 'denied' && <p role="alert" className="mt-3 flex items-center gap-2 text-sm text-amber-700"><AlertCircle size={15} />Google permission was not granted. No account was added.</p>}
@@ -124,7 +127,19 @@ export const GmailAccountsCard: React.FC = () => {
                     <li key={account.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
                         <div className="min-w-0 flex-1">
                             <p className="truncate font-medium text-gray-900">{account.email}</p>
-                            {account.status !== 'connected' && <p className="text-xs text-amber-700">Connection needs attention</p>}
+                            {account.status === 'reauth_required' && (
+                                <p className="text-xs text-amber-700" role="alert">
+                                    Google access needs reconnection.{' '}
+                                    {!accountState.enabled
+                                        ? 'Your admin has paused extra accounts. You can disconnect this one now and reconnect when the option is restored.'
+                                        : accountState.oauth_available === false
+                                            ? 'Your admin needs to finish Google connection setup before you can reconnect.'
+                                            : <>Choose Connect another Gmail above and select {account.email} at Google.</>}
+                                    {' '}Until then, this mailbox is omitted from AI Priorities and scheduled summaries.
+                                </p>
+                            )}
+                            {account.status !== 'connected' && account.status !== 'reauth_required' && <p className="text-xs text-amber-700">Connection needs attention</p>}
+                            {accountState.enabled === false && <p className="text-xs text-amber-700">Paused by your workspace admin</p>}
                             {account.status === 'connected' && account.ai_processing_unavailable && (
                                 <p className="mt-2 text-xs text-amber-700" role="alert">The selected AI provider is unavailable. Automatic mail processing is paused until your admin restores it.</p>
                             )}

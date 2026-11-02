@@ -336,6 +336,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     const triggerIngestion = async (userOverride?: User | null) => {
+        // The mock-auth preview must not start a real workspace transcript sweep.
+        if (import.meta.env.VITE_DEV_LOCAL_PREVIEW === 'true') return;
         if (hasTriggeredIngestion) return;
         
         const currentUser = userOverride !== undefined ? userOverride : user;

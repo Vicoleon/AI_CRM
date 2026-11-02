@@ -170,10 +170,15 @@ def test_xray_web_grounding_uses_selected_workspace_route(monkeypatch):
     monkeypatch.setattr(
         base,
         "generate_grounded_text_on_route",
-        lambda *args, **kwargs: observed.append((args, kwargs))
-        or ModelTextResponse(
-            '{"news":[]}', "gemini", route.model, "client",
-            citation_urls=("https://example.com/source",),
+        lambda *args, **kwargs: (
+            observed.append((args, kwargs))
+            or ModelTextResponse(
+                '{"news":[]}',
+                "gemini",
+                route.model,
+                "client",
+                citation_urls=("https://example.com/source",),
+            )
         ),
     )
     monkeypatch.setattr(

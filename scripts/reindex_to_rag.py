@@ -46,11 +46,12 @@ def main():
 
     from rubik_core.adapters.vertex_rag import VertexRagAdapter
     from rubik_core.dam.registry import DAMRegistry
+    from rubik_core.rag.manager import RagManager
     from rubik_core.tenancy.storage import assert_own_uri
 
     logger.info("Loading DAM registry...")
     registry = DAMRegistry()
-    all_assets = registry.list_assets()
+    all_assets = registry.list_assets(include_total=False)["assets"]
     logger.info(f"Found {len(all_assets)} total assets in DAM.")
 
     # Filter by status if requested
@@ -76,6 +77,7 @@ def main():
         return
 
     adapter = VertexRagAdapter()
+    manager = RagManager()
     success = 0
     failed = 0
 
@@ -105,11 +107,21 @@ def main():
             continue
 
         try:
-            logger.info(f"Uploading [{status}] {fname}...")
-            gcs_uri = (
-                adapter.upload_to_gcs(file_path) if file_path is not None else checked
+            target_corpus = manager.corpus_for_asset(
+                meta.get("department"), bool(meta.get("is_company_wide"))
             )
-            adapter.import_gcs_uri_to_corpus(gcs_uri)
+            logger.info(f"Uploading [{status}] {fname}...")
+            if file_path is not None:
+                gcs_uri = adapter.upload_and_import(file_path, target_corpus)
+                registry.update_asset(doc_id, {"source_path": gcs_uri})
+                current_version = meta.get("current_version")
+                if current_version:
+                    registry.update_version(
+                        doc_id, current_version, {"source_path": gcs_uri}
+                    )
+            else:
+                gcs_uri = checked
+                adapter.import_gcs_uri_to_corpus(gcs_uri, target_corpus)
             logger.info(f"  ✓ Imported {fname} → {gcs_uri}")
             success += 1
         except Exception as e:

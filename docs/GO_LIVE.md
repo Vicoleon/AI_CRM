@@ -13,7 +13,9 @@ private environment file. Keep client credentials and platform signing secrets
 in Secret Manager, not in that file or Git. Estimate the Cloud SQL tier before
 provisioning: the connection budget is
 `(service max instances + Job max instances) × (control pool + workspace count ×
-(sync pool + ADK pool)) + reserved connections`. Set the four
+(sync pool + ADK pool) + peak concurrent source-mutation advisory connections)
++ reserved connections`. Advisory connections use their own pool boundary but
+still occupy physical PostgreSQL slots during a managed corpus write. Set the four
 `CUBIE_PROVISION_*` capacity values and leave headroom for administrative work.
 
 ## 2. Bootstrap once, then inspect
@@ -96,16 +98,31 @@ grounding or media requirements. A selected client provider failure is shown
 and does not fall back to Cubie's managed Vertex account.
 
 Embedding models require a matching vector index. In **Admin → Workspace**,
-select each knowledge collection, then **Rebuild index** to create and validate
-a versioned candidate while search uses the current index. **Activate rebuilt
-index** switches only that collection after verification. OpenAI and Gemini
+select each knowledge collection, then **Rebuild index**. In GCP this starts a
+workspace-scoped Cloud Run Job that creates and validates a versioned candidate;
+the Admin card shows source progress and a retryable failure state. The local
+index rebuild runs directly. Search uses the current index throughout.
+**Activate rebuilt index** switches only that collection after verification. OpenAI and Gemini
 embeddings use that workspace's credential. In GCP, candidate and active
 vectors live in the workspace Cloud SQL pgvector tables; the rebuild checks
 every bound GCS source and the document update outbox before cutover. Verify
-the pgvector extension, HNSW index creation, source backfill, dual-write,
+the 0008 vector, 0009 ordered-outbox and 0010 managed-source-proof migrations,
+the pgvector extension, concurrent HNSW index creation (including an interrupted
+build and retry), continued document writes during the build, source backfill, dual-write,
 tenant isolation and private-file ACL against live Cloud SQL before client
 activation. A failed client key or index must stop search for that collection
-without using managed Vertex.
+without using managed Vertex. Cloud rebuilds report completed and total sources,
+but a safe corpus-size ceiling has not been measured. Before activation, run a
+representative build at the largest intended source count using the configured
+Cloud Run Job timeout and workspace database role. Record source count, total
+chunks, duration, provider rate limits and peak connections; set an operational
+size limit below that measured capacity. The build record treats a queued or
+running Job without progress for 30 minutes as stale and permits a retry.
+Repeated rebuilds currently leave retired version-specific HNSW indexes and
+applied outbox history for operator maintenance. Monitor their database size
+and set a reviewed cleanup/retention procedure before frequent rebuilds.
+DAM imports also retain a staging GCS copy after a successful corpus import;
+include that copy in storage sizing until cleanup is automated.
 
 For each client, record who controls the provider account and who accepts its
 data-processing terms before activating a workload. Rotate by saving a new key
@@ -152,6 +169,16 @@ that included personal Gmail context stays out of manager/team digests;
 personal mail is not logged to the shared CRM.
 Disconnecting revokes its Cubie access. Live OAuth connection and revoked-token
 behavior remain unverified until the client supplies an approved test account.
+
+Turning the admin option off pauses every extra mailbox read and scheduled AI
+run; existing connections stay saved so their owners can disconnect or resume
+after re-enablement. If the admin changes the AI Priorities provider or model,
+personal-mail processing remains paused until each owner approves the new
+route. An expired or revoked extra token requires reconnecting that mailbox;
+the default work mailbox and other healthy accounts continue. If the optional
+OAuth client settings are incomplete, Settings explains that extra-account
+connections are unavailable before opening Google. Verify these paused and
+reconnect states in a client test before enabling the option.
 
 Google classifies both `gmail.readonly` and `gmail.compose` as restricted OAuth
 scopes, and the latter grants API permission to send even though Cubie's user

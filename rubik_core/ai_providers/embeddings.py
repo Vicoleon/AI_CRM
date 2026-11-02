@@ -20,6 +20,7 @@ from rubik_core.ai_providers.registry import (
     ModelRoute,
     provider_connection_route,
 )
+from rubik_core.brand import PRODUCT_NAME
 from rubik_core.cost.usage import feature_context, record_usage
 from rubik_core.tenancy.context import current_workspace
 from rubik_core.tenancy.secrets import workspace_secret
@@ -252,6 +253,6 @@ def embed_connection_probe(provider: str, model: str) -> dict[str, object]:
     )
     with feature_context("ai_provider_connection_test"):
         vectors = embed_with_route(
-            route, ["Cubie embedding connection test"], dimension
+            route, [f"{PRODUCT_NAME} embedding connection test"], dimension
         )
     return {"provider": provider, "model": model, "dimension": len(vectors[0])}

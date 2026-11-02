@@ -44,9 +44,7 @@ def upgrade() -> None:
             f"ALTER TABLE cloud_vector_updates ALTER COLUMN sequence "
             f"SET DEFAULT nextval('{_SEQUENCE}')"
         )
-        op.execute(
-            f"ALTER SEQUENCE {_SEQUENCE} OWNED BY cloud_vector_updates.sequence"
-        )
+        op.execute(f"ALTER SEQUENCE {_SEQUENCE} OWNED BY cloud_vector_updates.sequence")
     else:
         rows = bind.execute(
             sa.text("SELECT id FROM cloud_vector_updates ORDER BY created_at, id")

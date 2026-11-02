@@ -21,6 +21,7 @@ from rubik_core.tenancy.gmail_accounts import (
     begin_connection,
     complete_connection,
     disconnect_account,
+    gmail_oauth_available,
     list_accounts,
     multi_gmail_enabled,
 )
@@ -61,6 +62,7 @@ def accounts(
     provider, model, fingerprint = _ai_processing_route()
     return {
         "enabled": multi_gmail_enabled(),
+        "oauth_available": gmail_oauth_available(),
         "default_account": user.email,
         "accounts": list_accounts(user.email),
         "ai_provider": provider,

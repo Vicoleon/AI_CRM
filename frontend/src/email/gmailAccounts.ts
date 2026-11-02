@@ -13,6 +13,7 @@ export interface GmailAccount {
 
 export interface GmailAccountsResponse {
     enabled: boolean;
+    oauth_available?: boolean;
     default_account: string;
     accounts: GmailAccount[];
     ai_provider?: string;

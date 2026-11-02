@@ -78,7 +78,13 @@ export const Settings: React.FC = () => (
             your extra mailbox pauses and you receive a notification. Open this card to
             review the new provider and allow inclusion again. You can still open the
             mailbox manually or disconnect it here at any time. If the selected provider
-            is unavailable, automatic use stays paused until your admin restores it.
+            is unavailable, automatic use stays paused until your admin restores it. If
+            Google connection setup is incomplete, the Connect button is unavailable and
+            your work mailbox still works. If Google access to an extra mailbox expires,
+            reconnect that address here; only that mailbox is left out of automatic runs
+            until you do. When an admin turns off extra accounts, their reads and automatic
+            processing pause, but you can still disconnect them. Turning the option back on
+            restores still-valid connections under the same approved AI model.
         </p>
 
         <SubHeading id="slack">Slack</SubHeading>

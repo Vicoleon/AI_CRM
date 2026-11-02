@@ -14,6 +14,8 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -31,6 +33,7 @@ from rubik_core.database.models import (
     CloudVectorVersion,
 )
 from rubik_core.tenancy.context import current_workspace
+from rubik_core.tenancy.registry import advisory_engine_for
 from rubik_core.tenancy.storage import assert_own_uri
 
 _CORPUS = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
@@ -75,6 +78,7 @@ class SourceUpdate:
     operation: str
     attempts: int
     status: str
+    managed_applied: bool
     sequence: int
     created_at: datetime
 
@@ -196,6 +200,8 @@ def replace_source(
     generation: int,
     content_sha256: str,
     chunks: list[Chunk],
+    *,
+    update_id: str | None = None,
 ) -> int:
     """Replace one source's vectors atomically, refusing stale generations."""
     _check_spec(spec)
@@ -247,6 +253,10 @@ def replace_source(
     try:
         with SessionLocal() as db:
             version = _version(db, spec, lock=True)
+            if update_id is not None:
+                _require_current_managed_update(
+                    db, update_id, spec.corpus, source_key, generation, "upsert"
+                )
             source = db.get(
                 CloudVectorSource,
                 (spec.corpus, spec.version, source_key),
@@ -255,7 +265,9 @@ def replace_source(
             if source is not None and source.generation > generation:
                 raise CloudVectorIndexError("Stale vector source generation")
             if source is not None and source.generation == generation:
-                if source.deleted or source.content_sha256 != content_sha256:
+                if (source.deleted and update_id is None) or (
+                    not source.deleted and source.content_sha256 != content_sha256
+                ):
                     raise CloudVectorIndexError("Vector source generation changed")
                 stored_count = db.scalar(
                     select(func.count())
@@ -305,13 +317,23 @@ def replace_source(
         raise CloudVectorIndexError("Vector source update failed") from None
 
 
-def tombstone_source(spec: CloudVectorSpec, source_uri: str, generation: int) -> None:
+def tombstone_source(
+    spec: CloudVectorSpec,
+    source_uri: str,
+    generation: int,
+    *,
+    update_id: str | None = None,
+) -> None:
     """Remove vectors immediately while retaining a no-resurrection marker."""
     _check_spec(spec)
     canonical, source_key = _source(source_uri, generation)
     try:
         with SessionLocal() as db:
             version = _version(db, spec, lock=True)
+            if update_id is not None:
+                _require_current_managed_update(
+                    db, update_id, spec.corpus, source_key, generation, "delete"
+                )
             source = db.get(
                 CloudVectorSource,
                 (spec.corpus, spec.version, source_key),
@@ -414,6 +436,7 @@ def _update_view(row: CloudVectorUpdate) -> SourceUpdate:
         operation=row.operation,
         attempts=row.attempts,
         status=row.status,
+        managed_applied=row.managed_applied,
         sequence=row.sequence,
         created_at=row.created_at,
     )
@@ -479,7 +502,9 @@ def _required_versions(db, corpus: str) -> list[str]:
     from rubik_core.control.models import WorkspaceConnector
 
     with control_session() as control:
-        row = control.get(WorkspaceConnector, (current_workspace(), "ai_embedding_indexes"))
+        row = control.get(
+            WorkspaceConnector, (current_workspace(), "ai_embedding_indexes")
+        )
         config = row.config if row is not None else None
     corpora = config.get("corpora") if isinstance(config, dict) else None
     item = corpora.get(corpus) if isinstance(corpora, dict) else None
@@ -492,7 +517,11 @@ def _required_versions(db, corpus: str) -> list[str]:
         value = item.get(key)
         if value is None:
             continue
-        data = value.get("spec") if key == "candidate" and isinstance(value, dict) else value
+        data = (
+            value.get("spec")
+            if key == "candidate" and isinstance(value, dict)
+            else value
+        )
         if not isinstance(data, dict):
             raise CloudVectorIndexError("Published vector index is invalid")
         try:
@@ -506,6 +535,53 @@ def _required_versions(db, corpus: str) -> list[str]:
     return list(dict.fromkeys(versions))
 
 
+def _require_current_managed_update(
+    db, update_id: str, corpus: str, source_key: str, generation: int, operation: str
+) -> CloudVectorUpdate:
+    """Reject an old source operation after a newer managed outcome is known."""
+    row = db.get(CloudVectorUpdate, update_id)
+    if (
+        row is None
+        or row.corpus != corpus
+        or row.source_key != source_key
+        or row.generation != generation
+        or row.operation != operation
+        or not row.managed_applied
+    ):
+        raise CloudVectorIndexError("Managed source update is unconfirmed")
+    newer = db.scalar(
+        select(CloudVectorUpdate.sequence)
+        .where(
+            CloudVectorUpdate.corpus == corpus,
+            CloudVectorUpdate.source_key == source_key,
+            CloudVectorUpdate.sequence > row.sequence,
+            CloudVectorUpdate.managed_applied.is_(True),
+        )
+        .order_by(CloudVectorUpdate.sequence.desc())
+        .limit(1)
+    )
+    if newer is not None:
+        raise CloudVectorIndexError("Vector source update was superseded")
+    return row
+
+
+def mark_update_managed_applied(update_id: str) -> None:
+    """Persist proof that Vertex import/delete returned before vector syncing."""
+    if not isinstance(update_id, str) or len(update_id) != 36:
+        raise CloudVectorIndexError("Vector update ID is invalid")
+    try:
+        with SessionLocal() as db:
+            row = db.get(CloudVectorUpdate, update_id, with_for_update=True)
+            if row is None or (row.status == "applied" and not row.managed_applied):
+                raise CloudVectorIndexError("Vector update is unavailable")
+            row.managed_applied = True
+            db.commit()
+    except CloudVectorIndexError:
+        raise
+    except Exception:
+        raise CloudVectorIndexError("Managed update proof could not be saved") from None
+
+
 def mark_update_applied(update_id: str) -> None:
     if not isinstance(update_id, str) or len(update_id) != 36:
         raise CloudVectorIndexError("Vector update ID is invalid")
@@ -514,6 +590,14 @@ def mark_update_applied(update_id: str) -> None:
             row = db.get(CloudVectorUpdate, update_id, with_for_update=True)
             if row is None:
                 raise CloudVectorIndexError("Vector update is unavailable")
+            _require_current_managed_update(
+                db,
+                update_id,
+                row.corpus,
+                row.source_key,
+                row.generation,
+                row.operation,
+            )
             for version in _required_versions(db, row.corpus):
                 source = db.get(
                     CloudVectorSource,
@@ -538,7 +622,10 @@ def mark_update_applied(update_id: str) -> None:
 
 def mark_update_superseded(update_id: str, successor_id: str) -> None:
     """Clear an older event only after a later same-source event is applied."""
-    if not all(isinstance(value, str) and len(value) == 36 for value in (update_id, successor_id)):
+    if not all(
+        isinstance(value, str) and len(value) == 36
+        for value in (update_id, successor_id)
+    ):
         raise CloudVectorIndexError("Vector update ID is invalid")
     try:
         with SessionLocal() as db:
@@ -552,6 +639,7 @@ def mark_update_superseded(update_id: str, successor_id: str) -> None:
                 or successor.sequence <= old.sequence
                 or successor.generation < old.generation
                 or successor.status != "applied"
+                or not successor.managed_applied
             ):
                 raise CloudVectorIndexError("Vector update successor is invalid")
             old.status = "applied"
@@ -572,6 +660,8 @@ def mark_update_failed(update_id: str) -> None:
             row = db.get(CloudVectorUpdate, update_id, with_for_update=True)
             if row is None:
                 raise CloudVectorIndexError("Vector update is unavailable")
+            if row.status == "applied":
+                return
             row.status = "failed"
             row.attempts += 1
             db.commit()
@@ -637,6 +727,10 @@ def verify_candidate(
             ).yield_per(256):
                 if chunk.source_key not in actual_counts:
                     raise CloudVectorIndexError("Vector index contains orphan chunks")
+                if chunk.metadata_json.get("source_path") != chunk.source_uri:
+                    raise CloudVectorIndexError(
+                        "Vector chunk source does not match object"
+                    )
                 _check_vector(chunk.embedding, spec.dimension)
                 actual_counts[chunk.source_key] += 1
             manifest: list[tuple[str, int, str, int]] = []
@@ -679,24 +773,104 @@ def build_ann_index(spec: CloudVectorSpec) -> None:
     _check_spec(spec)
     try:
         with SessionLocal() as db:
-            version = _version(db, spec, lock=True)
-            if version.status not in ("ready", "active") or not version.verified_at:
-                raise CloudVectorIndexError("Vector index has not been verified")
-            if _pending_count(db, spec.corpus):
-                raise CloudVectorIndexError("Vector source updates are still pending")
-            if db.bind.dialect.name == "postgresql":
-                # corpus/version/dimension passed through fixed regex/catalog
-                # checks above; no provider text or request data enters DDL.
-                db.execute(text("SET LOCAL statement_timeout = '5min'"))
-                db.execute(text(_ann_index_sql(spec)))
-            elif settings.APP_MODE == AppMode.GCP:
+            if db.bind.dialect.name != "postgresql":
+                _ann_build_snapshot(db, spec)
+                if settings.APP_MODE != AppMode.GCP:
+                    version = _version(db, spec, lock=True)
+                    version.ann_ready = True
+                    db.commit()
+                    return
                 raise CloudVectorIndexError("Cloud vector storage requires PostgreSQL")
-            version.ann_ready = True
-            db.commit()
+        with _ann_build_connection(spec) as connection:
+            # No ORM session or table lock remains open while HNSW scans the
+            # shared chunk table. Source writes continue during the build.
+            with SessionLocal() as db:
+                snapshot = _ann_build_snapshot(db, spec)
+            index_name = _ann_index_name(spec)
+            state = _ann_catalog_state(connection, index_name)
+            if state is not None and state != (True, True):
+                connection.execute(text(f"DROP INDEX CONCURRENTLY {index_name}"))
+                state = None
+            if state is None:
+                connection.execute(text(_ann_index_sql(spec)))
+            if _ann_catalog_state(connection, index_name) != (True, True):
+                raise CloudVectorIndexError("Vector search index is invalid")
+            with SessionLocal() as db:
+                version = _version(db, spec, lock=True)
+                if _ann_build_snapshot(db, spec) != snapshot:
+                    raise CloudVectorIndexError(
+                        "Vector sources changed during index build"
+                    )
+                version.ann_ready = True
+                db.commit()
     except CloudVectorIndexError:
         raise
     except Exception:
         raise CloudVectorIndexError("Vector search index build failed") from None
+
+
+def _ann_build_snapshot(db, spec: CloudVectorSpec) -> tuple:
+    version = _version(db, spec, lock=True)
+    if (
+        version.status not in ("ready", "active")
+        or not version.verified_at
+        or not version.source_fingerprint
+    ):
+        raise CloudVectorIndexError("Vector index has not been verified")
+    if _pending_count(db, spec.corpus):
+        raise CloudVectorIndexError("Vector source updates are still pending")
+    return (
+        version.status,
+        version.verified_at,
+        version.source_fingerprint,
+        version.source_count,
+        version.chunk_count,
+    )
+
+
+@contextmanager
+def _ann_build_connection(spec: CloudVectorSpec) -> Iterator:
+    """Hold one tenant-wide build lease on a dedicated autocommit connection."""
+    engine = advisory_engine_for(spec.workspace)
+    lock_id = int.from_bytes(
+        hashlib.sha256(f"ann-build:{spec.workspace}".encode()).digest()[:8],
+        "big",
+        signed=True,
+    )
+    try:
+        with engine.connect() as raw:
+            if raw.dialect.name != "postgresql":
+                raise CloudVectorIndexError("Cloud vector storage requires PostgreSQL")
+            connection = raw.execution_options(isolation_level="AUTOCOMMIT")
+            connection.execute(text("SET statement_timeout = '5min'"))
+            connection.execute(text("SET lock_timeout = '5s'"))
+            if not connection.scalar(
+                text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": lock_id}
+            ):
+                raise CloudVectorIndexError("Vector index build is already running")
+            try:
+                yield connection
+            finally:
+                connection.scalar(
+                    text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id}
+                )
+    finally:
+        engine.dispose()
+
+
+def _ann_catalog_state(connection, index_name: str) -> tuple[bool, bool] | None:
+    row = connection.execute(
+        text(
+            "SELECT i.indisvalid, i.indisready FROM pg_index AS i "
+            "JOIN pg_class AS idx ON idx.oid = i.indexrelid "
+            "JOIN pg_class AS tbl ON tbl.oid = i.indrelid "
+            "WHERE idx.relname = :index_name "
+            "AND tbl.oid = to_regclass('cloud_vector_chunks') "
+            "AND idx.relnamespace = tbl.relnamespace"
+        ),
+        {"index_name": index_name},
+    ).one_or_none()
+    return (bool(row[0]), bool(row[1])) if row is not None else None
 
 
 def _purge_version(db, version: CloudVectorVersion) -> None:
@@ -799,14 +973,18 @@ def _filter_clause(filters: dict[str, Any] | None) -> tuple[str, dict[str, Any]]
     return "".join(clauses), params
 
 
-def _ann_index_sql(spec: CloudVectorSpec) -> str:
+def _ann_index_name(spec: CloudVectorSpec) -> str:
     _check_spec(spec)
-    index_name = (
+    return (
         "ix_cloud_vector_ann_"
         + hashlib.sha256(f"{spec.corpus}:{spec.version}".encode()).hexdigest()[:20]
     )
+
+
+def _ann_index_sql(spec: CloudVectorSpec) -> str:
+    index_name = _ann_index_name(spec)
     return (
-        f"CREATE INDEX IF NOT EXISTS {index_name} "
+        f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name} "
         "ON cloud_vector_chunks USING hnsw "
         f"((embedding::vector({spec.dimension})) vector_cosine_ops) "
         f"WHERE corpus = '{spec.corpus}' AND version = '{spec.version}'"
@@ -890,7 +1068,9 @@ def query_chunks(
                 return []
             if db.bind.dialect.name == "postgresql":
                 db.execute(text("SET LOCAL statement_timeout = '5s'"))
-                query = text(_pg_query_sql(spec, clause, exact_subset=allowed is not None))
+                query = text(
+                    _pg_query_sql(spec, clause, exact_subset=allowed is not None)
+                )
                 if allowed is not None:
                     query = query.bindparams(
                         bindparam("allowed_source_uris", expanding=True)

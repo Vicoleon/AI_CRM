@@ -27,6 +27,7 @@ from google.oauth2.credentials import Credentials
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
+from rubik_core.brand import PRODUCT_NAME
 from rubik_core.config import AppMode, settings
 from rubik_core.control.repository import get_workspace
 from rubik_core.database.db import SessionLocal
@@ -227,6 +228,15 @@ def _oauth_config() -> tuple[str, str, str]:
     ):
         raise GmailOAuthUnavailable("Gmail OAuth is unavailable")
     return client_id, client_secret, redirect_uri
+
+
+def gmail_oauth_available() -> bool:
+    """Tell the owner whether connecting can start, without exposing secrets."""
+    try:
+        _oauth_config()
+    except GmailOAuthUnavailable:
+        return False
+    return True
 
 
 def _sign_state(
@@ -591,7 +601,7 @@ def list_accounts(owner_email: str) -> list[dict[str, str | bool]]:
                             body=(
                                 f"Your workspace changed its AI Priorities model to "
                                 f"{provider} {model}. Review {row.email} in Settings "
-                                "before Cubie includes it in AI Priorities and scheduled summaries again."
+                                f"before {PRODUCT_NAME} includes it in AI Priorities and scheduled summaries again."
                             ),
                             severity="warn",
                             link="/settings?tab=email",

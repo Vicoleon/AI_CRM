@@ -135,8 +135,8 @@ def _verified_ragfiles(corpus: str) -> dict[str, str]:
     return files
 
 
-def _source_for_filed_name(rag_file_name: str) -> str:
-    from rubik_core.chat_files import INDEX_PRIVATE
+def _source_for_filed_name(rag_file_name: str, *, allow_pending: bool = False) -> str:
+    from rubik_core.chat_files import INDEX_PENDING, INDEX_PRIVATE
     from rubik_core.database.db import SessionLocal
     from rubik_core.database.models import ChatUpload
 
@@ -150,10 +150,131 @@ def _source_for_filed_name(rag_file_name: str) -> str:
         if (
             len(rows) != 1
             or not rows[0].owner_email
-            or rows[0].index_status != INDEX_PRIVATE
+            or rows[0].index_status
+            not in (
+                (INDEX_PRIVATE, INDEX_PENDING) if allow_pending else (INDEX_PRIVATE,)
+            )
         ):
             raise PrivateIndexError("a private library record cannot be mapped")
         return cloud_source_uri(rows[0].id)
+
+
+def _sources_for_filed_names(rag_file_names: list[str]) -> dict[str, str]:
+    """Resolve authorized private sources with one owner-scoped tenant read."""
+    from rubik_core.chat_files import INDEX_PRIVATE
+    from rubik_core.database.db import SessionLocal
+    from rubik_core.database.models import ChatUpload
+
+    names = list(dict.fromkeys(rag_file_names))
+    if not names:
+        return {}
+    with SessionLocal() as db:
+        rows = (
+            db.query(ChatUpload)
+            .filter(
+                ChatUpload.rag_file_name.in_(names),
+                ChatUpload.index_status == INDEX_PRIVATE,
+            )
+            .all()
+        )
+        sources: dict[str, str] = {}
+        for row in rows:
+            if (
+                not row.owner_email
+                or not row.rag_file_name
+                or row.rag_file_name in sources
+            ):
+                raise PrivateIndexError("a private library record cannot be mapped")
+            sources[row.rag_file_name] = cloud_source_uri(row.id)
+        if set(sources) != set(names):
+            raise PrivateIndexError("a private library record cannot be mapped")
+        return sources
+
+
+def _ragfile_for_upload(corpus: str, upload_id: str) -> str | None:
+    """Resolve only a uniquely named file after an ambiguous Vertex upload."""
+    from rubik_core.tenancy.corpora import assert_own_rag_file
+
+    matches = []
+    for item in _rag().list_files(corpus_name=corpus):
+        name = assert_own_rag_file(item.name, corpus)
+        if _ragfile_upload_id(item) == upload_id:
+            matches.append(name)
+    if len(matches) > 1:
+        raise PrivateIndexError("the private library upload is ambiguous")
+    return matches[0] if matches else None
+
+
+def _verify_named_upload_file(corpus: str, rag_file_name: str, upload_id: str) -> None:
+    """Bind a trusted upload ID to the exact file before cleanup or deletion."""
+    from rubik_core.tenancy.corpora import assert_own_rag_file
+
+    matches = []
+    named_file = None
+    for item in _rag().list_files(corpus_name=corpus):
+        name = assert_own_rag_file(item.name, corpus)
+        if name == rag_file_name:
+            named_file = item
+        if _ragfile_upload_id(item) == upload_id:
+            matches.append(name)
+    if len(matches) > 1 or (matches and matches[0] != rag_file_name):
+        raise PrivateIndexError("the private library file does not match")
+    if named_file is not None and _ragfile_upload_id(named_file) != upload_id:
+        raise PrivateIndexError("the private library file does not match")
+
+
+def repair_orphan_ragfiles(bound_resource: str, *, max_repairs: int = 1) -> int:
+    """Remove filed names whose upload row was cancelled or never committed.
+
+    A request can time out or the instance can stop after Vertex created a
+    ragFile. The deterministic display name links it to the exact upload ID;
+    only explicitly chat-only or absent rows are eligible for cleanup. Pending
+    rows remain ambiguous while an upload may still be running.
+    """
+    from rubik_core.ai_providers.cloud_rag_bridge import _automatic_repair_lock
+    from rubik_core.chat_files import INDEX_CHAT_ONLY, INDEX_PRIVATE
+    from rubik_core.database.db import SessionLocal
+    from rubik_core.database.models import ChatUpload
+    from rubik_core.tenancy.corpora import corpus_id, require_bound_corpus_id
+
+    require_bound_corpus_id(bound_resource)
+    if corpus_id("private_uploads", create=False) != bound_resource:
+        return 0
+    if not isinstance(max_repairs, int) or not 1 <= max_repairs <= 100:
+        raise PrivateIndexError("private library repair limit is invalid")
+    with _automatic_repair_lock(bound_resource):
+        files = _verified_ragfiles(bound_resource)
+        orphaned: list[tuple[str, str]] = []
+        upload_ids = [upload_id_from_source(uri) for uri in files.values()]
+        if None in upload_ids or len(set(upload_ids)) != len(upload_ids):
+            raise PrivateIndexError("a private library file cannot be mapped")
+        with SessionLocal() as db:
+            rows = db.query(ChatUpload).filter(ChatUpload.id.in_(upload_ids)).all()
+            by_id = {row.id: row for row in rows}
+            for name, uri in files.items():
+                upload_id = upload_id_from_source(uri)
+                if not upload_id:
+                    raise PrivateIndexError("a private library file cannot be mapped")
+                row = by_id.get(upload_id)
+                if row is None:
+                    orphaned.append((name, upload_id))
+                elif not row.owner_email:
+                    raise PrivateIndexError("a private library file has no owner")
+                elif row.index_status == INDEX_PRIVATE and row.rag_file_name == name:
+                    continue
+                elif row.index_status == INDEX_CHAT_ONLY and row.rag_file_name in (
+                    None,
+                    name,
+                ):
+                    orphaned.append((name, upload_id))
+                else:
+                    raise PrivateIndexError("a private library file cannot be mapped")
+        for name, upload_id in orphaned[:max_repairs]:
+            if not remove(name, upload_id=upload_id):
+                raise PrivateIndexError("private library orphan cleanup needs repair")
+        if len(orphaned) > max_repairs:
+            raise PrivateIndexError("private library orphan cleanup is incomplete")
+        return len(orphaned)
 
 
 def ensure_cloud_sources() -> set[str]:
@@ -166,6 +287,7 @@ def ensure_cloud_sources() -> set[str]:
     corpus = resolve_corpus(create_if_missing=False)
     if not corpus:
         raise PrivateIndexError("the private library corpus is unavailable")
+    repair_orphan_ragfiles(corpus, max_repairs=100)
     files = _verified_ragfiles(corpus)
     with SessionLocal() as db:
         rows = (
@@ -256,9 +378,24 @@ def add_document(upload_id: str, document: str) -> str:
     corpus = resolve_corpus()
     if not corpus:
         raise PrivateIndexError("the private library is not available")
+    from rubik_core.ai_providers.cloud_rag_bridge import cloud_source_mutation_lock
+    from rubik_core.ai_providers.embedding_index import cloud_index_versions
+
+    if (settings.APP_MODE == AppMode.GCP and settings.GCS_BUCKET_NAME) or any(
+        cloud_index_versions(corpus)
+    ):
+        with cloud_source_mutation_lock(corpus, cloud_source_uri(upload_id)):
+            return _add_document_locked(corpus, upload_id, document)
+    return _add_document_locked(corpus, upload_id, document)
+
+
+def _add_document_locked(corpus: str, upload_id: str, document: str) -> str:
+    """Store the source and complete Vertex/vector mutation under source lock."""
     rag = _rag()
     from rubik_core.ai_providers.cloud_rag_bridge import (
+        CloudSourceUpdate,
         begin_cloud_source_update,
+        confirm_managed_source_update,
         fail_cloud_source_update,
         finish_cloud_source_update,
     )
@@ -284,14 +421,61 @@ def add_document(upload_id: str, document: str) -> str:
                     )
                 ),
             )
-    except ValueError as exc:
-        # upload_file raises ValueError when the corpus is gone.
-        fail_cloud_source_update(update)
-        forget_corpus()
-        raise PrivateIndexError("the private library upload failed") from exc
     except Exception as exc:  # noqa: BLE001
-        fail_cloud_source_update(update)
-        raise PrivateIndexError("the private library upload failed") from exc
+        # The SDK may raise after creating the ragFile. Keep the exact name so
+        # the ChatUpload owner row can be committed and later repair can map it.
+        try:
+            recovered = _ragfile_for_upload(corpus, upload_id)
+        except Exception:
+            fail_cloud_source_update(update)
+            if isinstance(exc, ValueError):
+                forget_corpus()
+            raise PrivateIndexError("the private library upload is ambiguous") from None
+        if recovered:
+            if update is None:
+                return recovered
+            try:
+                # The upload raised, so its managed outcome has no proof. A
+                # successful compensating delete is the only safe way to
+                # settle it without leaving an unowned ragFile searchable.
+                rag.delete_file(name=recovered)
+            except NotFound:
+                pass
+            except Exception:
+                fail_cloud_source_update(update)
+                return recovered
+        if update is not None and source_uri is not None:
+            from rubik_core.ai_providers.cloud_vector_index import (
+                enqueue_source_update,
+            )
+            from rubik_core.ai_providers.embedding_index import cloud_corpus_key
+
+            try:
+                successor = CloudSourceUpdate(
+                    enqueue_source_update(
+                        cloud_corpus_key(corpus),
+                        source_uri,
+                        update.generation,
+                        "delete",
+                    ),
+                    update.generation,
+                )
+                confirm_managed_source_update(successor)
+                finish_cloud_source_update(corpus, source_uri, "delete", successor)
+            except Exception:
+                fail_cloud_source_update(update)
+                raise PrivateIndexError(
+                    "the private library upload needs repair"
+                ) from None
+            try:
+                _cloud_blob(source_uri).delete(if_generation_match=update.generation)
+            except NotFound:
+                pass
+            except Exception:
+                logger.warning("[chat-files] abandoned private source cleanup failed")
+        if isinstance(exc, ValueError):
+            forget_corpus()
+        raise PrivateIndexError("the private library upload failed") from None
     name = getattr(rag_file, "name", "") or ""
     if not name:
         fail_cloud_source_update(update)
@@ -305,11 +489,10 @@ def add_document(upload_id: str, document: str) -> str:
         raise PrivateIndexError("the private library returned a foreign file") from None
     if source_uri is not None:
         try:
+            confirm_managed_source_update(update)
             finish_cloud_source_update(corpus, source_uri, "upsert", update)
         except Exception:
-            raise PrivateIndexError(
-                "the private library index is unavailable"
-            ) from None
+            logger.warning("[chat-files] private vector sync needs repair")
     return name
 
 
@@ -332,7 +515,7 @@ def search(rag_file_names: list[str], query: str, top_k: int) -> list[Hit]:
     from rubik_core.ai_providers.embedding_index import active_cloud_index
 
     if active_cloud_index(corpus) is not None:
-        mapping = _verified_ragfiles(corpus)
+        mapping = _sources_for_filed_names([name for name in rag_file_names if name])
         allowed_uris = []
         for name in rag_file_names:
             if name:
@@ -389,7 +572,7 @@ def search(rag_file_names: list[str], query: str, top_k: int) -> list[Hit]:
     return hits
 
 
-def remove(rag_file_name: str | None) -> bool:
+def remove(rag_file_name: str | None, *, upload_id: str | None = None) -> bool:
     """Delete one ragFile. True when it is gone (or was never there).
 
     Not gated on :func:`available`: a file filed before the library was
@@ -406,30 +589,80 @@ def remove(rag_file_name: str | None) -> bool:
 
     assert_own_rag_file(rag_file_name, corpus)
     from rubik_core.ai_providers.cloud_rag_bridge import (
-        begin_cloud_source_update,
-        fail_cloud_source_update,
-        finish_cloud_source_update,
+        cloud_source_mutation_lock,
     )
     from rubik_core.ai_providers.embedding_index import cloud_index_versions
 
-    source_uri = None
+    selected = any(cloud_index_versions(corpus))
+    if selected or (settings.APP_MODE == AppMode.GCP and settings.GCS_BUCKET_NAME):
+        lock_uri = (
+            cloud_source_uri(upload_id)
+            if upload_id
+            else _source_for_filed_name(rag_file_name, allow_pending=True)
+        )
+        with cloud_source_mutation_lock(corpus, lock_uri):
+            return _remove_locked(
+                corpus, rag_file_name, upload_id, lock_uri if selected else None
+            )
+    return _remove_locked(corpus, rag_file_name, upload_id, None)
+
+
+def _remove_locked(
+    corpus: str,
+    rag_file_name: str,
+    upload_id: str | None,
+    source_uri: str | None,
+) -> bool:
+    """Delete the exact private file while its source mutation lock is held."""
+    from rubik_core.ai_providers.cloud_rag_bridge import (
+        begin_cloud_source_update,
+        confirm_managed_source_update,
+        finish_cloud_source_update,
+        settle_failed_managed_update,
+    )
+
     update = None
-    if any(cloud_index_versions(corpus)):
-        source_uri = _source_for_filed_name(rag_file_name)
+    if upload_id:
+        _verify_named_upload_file(corpus, rag_file_name, upload_id)
+    elif source_uri is not None:
+        if _source_for_filed_name(rag_file_name, allow_pending=True) != source_uri:
+            raise PrivateIndexError("the private library file does not match")
+    if source_uri is not None:
         update = begin_cloud_source_update(corpus, source_uri, "delete")
 
+    settled = False
     try:
         _rag().delete_file(name=rag_file_name)
     except NotFound:
-        pass
+        if update is not None:
+            try:
+                settled = settle_failed_managed_update(
+                    corpus, source_uri, "delete", update
+                )
+            except Exception:
+                logger.warning("[chat-files] private delete needs repair")
+                return False
     except Exception:  # noqa: BLE001
-        fail_cloud_source_update(update)
-        logger.warning("[chat-files] could not delete a private ragFile", exc_info=True)
-        return False
+        if update is None:
+            logger.warning(
+                "[chat-files] could not delete a private ragFile", exc_info=True
+            )
+            return False
+        try:
+            settled = settle_failed_managed_update(corpus, source_uri, "delete", update)
+        except Exception:
+            logger.warning("[chat-files] private delete needs repair")
+            return False
+        if not settled:
+            return False
+    else:
+        confirm_managed_source_update(update)
     if source_uri is not None:
         try:
-            finish_cloud_source_update(corpus, source_uri, "delete", update)
-            _cloud_blob(source_uri).delete()
+            if not settled:
+                finish_cloud_source_update(corpus, source_uri, "delete", update)
+            kwargs = {"if_generation_match": update.generation} if update else {}
+            _cloud_blob(source_uri).delete(**kwargs)
         except NotFound:
             pass
         except Exception:

@@ -178,6 +178,7 @@ def test_vertex_delete_removes_gcs_only_after_verified_rag_delete(monkeypatch):
     monkeypatch.setattr(settings, "GCS_BUCKET_NAME", "shared-bucket")
     monkeypatch.setattr(vertex_rag, "require_bound_corpus_id", lambda _: resource)
     monkeypatch.setattr(vertex_rag, "assert_own_rag_file", lambda name, _: name)
+    monkeypatch.setattr(vertex_rag, "source_is_published", lambda *_: False)
     monkeypatch.setattr(
         vertex_rag.rag,
         "list_files",
@@ -259,9 +260,9 @@ def test_chroma_persist_directory_is_per_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "CHROMA_PERSIST_DIR", str(tmp_path))
     monkeypatch.setattr(chroma.chromadb, "PersistentClient", client)
     with use_workspace("alpha"):
-        chroma.ChromaAdapter()
+        chroma.ChromaAdapter(collection_name="test-path")
     with use_workspace("beta"):
-        chroma.ChromaAdapter()
+        chroma.ChromaAdapter(collection_name="test-path")
     assert paths == [
         str(tmp_path / "workspaces" / "alpha"),
         str(tmp_path / "workspaces" / "beta"),

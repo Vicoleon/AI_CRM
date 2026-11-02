@@ -515,6 +515,9 @@ def _extraction(db, session_id: str, *, facts: list[dict], leads: list[dict] = (
                 status="proposed",
             )
         )
+    # The extractor moves the call out of transcript_ready when it commits its
+    # result; a row alone is deliberately not enough to expose draft content.
+    db.get(CallSession, session_id).status = "extracted"
     db.commit()
     return extraction
 
@@ -1095,12 +1098,14 @@ def test_a_call_with_no_checklist_keeps_todays_wrap_up_shape(db):
 
     assert set(payload) == {
         "session",
+        "extraction",
         "groups",
         "script_coverage",
         "unscripted_products",
     }
     assert payload["script_coverage"] == []
     assert payload["unscripted_products"] == []
+    assert payload["extraction"]["status"] == "complete"
     assert db.query(CallSessionScript).count() == 0
 
 

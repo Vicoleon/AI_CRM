@@ -51,6 +51,24 @@ def test_chunking_overlap():
         assert len(c.text) > 0
 
 
+def test_chunking_stays_available_without_tokenizer_download(monkeypatch):
+    from rubik_core.ingestion import chunker as module
+    from rubik_core.ingestion.loader import RawDocument
+
+    def unavailable(*_args, **_kwargs):
+        raise ConnectionError("Tokenizer vocabulary is unavailable")
+
+    monkeypatch.setattr(module.tiktoken, "encoding_for_model", unavailable)
+    monkeypatch.setattr(module.tiktoken, "get_encoding", unavailable)
+    chunker = TokenAwareChunker(chunk_size=20, chunk_overlap=2)
+    chunks = chunker.chunk_document(
+        RawDocument(doc_id="offline", text="A useful offline source " * 8, metadata={})
+    )
+    assert chunker.encoder is None
+    assert len(chunks) > 1
+    assert all(chunk.text for chunk in chunks)
+
+
 def test_heuristic_metadata_reads_the_date():
     loader = DocumentLoader()
     meta = loader._heuristic_metadata("Quarterly review, issued 2026-03-31.")

@@ -25,7 +25,7 @@ from backend.routers import agents as agents_router
 from backend.routers import jobs as jobs_router
 from rubik_core.auth.session_tokens import mint_session_token
 from rubik_core.company.operations import OperationsConfig, OperationsConfigUnavailable
-from rubik_core.config import settings
+from rubik_core.config import AppMode, settings
 from rubik_core.database.models import Base, Role, User
 from rubik_core.database.schemas import UserProfile
 
@@ -97,6 +97,21 @@ def test_the_company_wide_transcript_sync_is_admins_only(launched, who, status):
     assert launched.called is (status == 200)
 
 
+def test_local_preview_cannot_launch_company_wide_transcript_sync(
+    launched, monkeypatch
+):
+    monkeypatch.setattr(settings, "APP_MODE", AppMode.DEV_MOCK_AUTH)
+    app.dependency_overrides[get_current_user] = lambda: ADMIN
+
+    response = client.post("/api/ingest/meet-transcripts")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Global transcript synchronization is unavailable in local preview."
+    )
+    launched.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "who, status", [(SYSTEMS_MEMBER, 403), (ADMIN, 200)], ids=["systems", "admin"]
 )
@@ -114,6 +129,26 @@ def test_the_scheduler_sync_goes_by_the_admin_role(launched, monkeypatch, who, s
 
     assert response.status_code == status, response.text
     assert launched.called is (status == 200)
+
+
+def test_local_preview_cannot_launch_scheduler_transcript_sync(launched, monkeypatch):
+    from backend.routers import ingest as ingest_router
+
+    monkeypatch.setattr(settings, "APP_MODE", AppMode.DEV_MOCK_AUTH)
+    monkeypatch.setattr(settings, "SCHEDULER_API_KEY", "the-key")
+    app.dependency_overrides[get_current_user] = lambda: ADMIN
+    monkeypatch.setattr(ingest_router, "get_current_user", lambda request, creds: ADMIN)
+
+    token, _, _ = mint_session_token(ADMIN.email, "test")
+    response = client.post(
+        "/api/ingest/scheduler/sync", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Global transcript synchronization is unavailable in local preview."
+    )
+    launched.assert_not_called()
 
 
 # ── who hears about it ──────────────────────────────────────────────────────

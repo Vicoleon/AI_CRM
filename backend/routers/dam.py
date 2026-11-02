@@ -311,7 +311,20 @@ def _run_ingest(
             log_action(actor_email, "ingest", doc_id, "failure", {"error": err})
             logger.error("Background ingest failed for %s: %s", doc_id, err)
             return
-        dam_registry.update_asset(doc_id, {"processing": False})
+        published_uri = res_dict.get("gcs_uri")
+        if published_uri:
+            from rubik_core.tenancy.storage import assert_own_uri
+
+            assert_own_uri(published_uri)
+            dam_registry.update_asset(
+                doc_id, {"source_path": published_uri, "processing": False}
+            )
+            if is_version:
+                dam_registry.update_version(
+                    doc_id, version_number, {"source_path": published_uri}
+                )
+        else:
+            dam_registry.update_asset(doc_id, {"processing": False})
         log_action(actor_email, "ingest", doc_id, "success", manual_metadata)
         logger.info("Background ingest complete for %s", doc_id)
 

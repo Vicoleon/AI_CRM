@@ -21,6 +21,7 @@ from rubik_core.ai_providers.registry import (
 )
 from rubik_core.ai_providers.runtime import ProviderRequestError, test_connection
 from rubik_core.auth.registry import UserProfile
+from rubik_core.config import AppMode, settings
 from rubik_core.cost.usage import feature_context
 from rubik_core.database.db import SessionLocal, get_db
 
@@ -210,10 +211,38 @@ def prepare_embedding_index_route(
     from rubik_core.ai_providers.embedding_index import prepare_embedding_index
 
     try:
-        with feature_context("embedding_index_rebuild"):
-            result = prepare_embedding_index(
+        if settings.APP_MODE == AppMode.GCP:
+            from backend.jobs.launcher import (
+                launch_module_execution,
+                reject_support_background_work,
+            )
+            from rubik_core.ai_providers.cloud_embedding_workflow import (
+                fail_cloud_embedding_rebuild,
+                queue_cloud_embedding_rebuild,
+            )
+
+            reject_support_background_work()
+            result = queue_cloud_embedding_rebuild(
                 payload.provider, payload.model, corpus=payload.corpus
             )
+            try:
+                launch_module_execution(
+                    "backend.jobs.cloud_embedding_rebuild_job",
+                    ["--run-id", result["run_id"]],
+                )
+            except Exception:
+                fail_cloud_embedding_rebuild(result["corpus"], result["run_id"])
+                raise HTTPException(
+                    status_code=503,
+                    detail="Embedding rebuild could not start. Please retry.",
+                ) from None
+        else:
+            with feature_context("embedding_index_rebuild"):
+                result = prepare_embedding_index(
+                    payload.provider, payload.model, corpus=payload.corpus
+                )
+    except HTTPException:
+        raise
     except (
         ValueError,
         IncompatibleModelRoute,

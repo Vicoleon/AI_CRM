@@ -1853,8 +1853,8 @@ class AgentTools:
 
         # ── UC-1: prefer audience-shaped multi-corpus fan-out (GCP only) ────
         # Resolves the user's allowed RAGs (their dept + companywide; admins
-        # see all) and queries them in a single retrieval_query call. If no
-        # corpora exist yet, NoUC1CorporaError → fall through to legacy.
+        # see all) and queries them in a single retrieval_query call. A failed
+        # audience lookup cannot safely search the old unscoped default corpus.
         if settings.APP_MODE == AppMode.GCP:
             from rubik_core.rag import (
                 NoUC1CorporaError,
@@ -1867,9 +1867,13 @@ class AgentTools:
                 allowed = rags_for_user_email(self.user_email)
                 if not allowed:
                     logger.info(
-                        "UC-1 RAG fan-out: user %s has no allowed RAGs; falling back",
+                        "UC-1 RAG fan-out: user %s has no allowed RAGs",
                         self.user_email,
                     )
+                    return {
+                        "status": "low_confidence",
+                        "report": _RAG_LOW_CONFIDENCE_REPORT,
+                    }
                 else:
                     mgr = RagManager()
                     hits = mgr.query(query_text=query, rags=allowed, top_k=top_k)
@@ -1909,75 +1913,45 @@ class AgentTools:
                         )
                     return {"status": "success", "report": "\n\n---\n\n".join(results)}
             except NoUC1CorporaError as e:
-                logger.info(
-                    "UC-1 RAG fan-out unavailable (%s); falling back to legacy path", e
-                )
+                logger.info("UC-1 RAG fan-out is not configured (%s)", e)
+                return {
+                    "status": "error",
+                    "error_message": "The knowledge base is not set up for your workspace.",
+                }
             except RagOperationError as e:
-                logger.warning(
-                    "UC-1 RAG fan-out failed (%s); falling back to legacy path", e
-                )
+                logger.warning("UC-1 RAG fan-out failed (%s)", e)
+                return {
+                    "status": "error",
+                    "error_message": "The knowledge base is unavailable. Please retry later.",
+                }
 
+        from rubik_core.adapters.chroma import ChromaAdapter
         from rubik_core.models import get_embeddings
 
-        # ── Legacy: single-corpus VertexRagAdapter (pre-UC-1) ───────────────
-        # Reached only when UC-1 corpora don't exist yet (NoUC1CorporaError).
-        # Will be removed once the UC-1 corpora are fully validated.
-        if settings.APP_MODE == AppMode.GCP:
-            from rubik_core.adapters.vertex_rag import VertexRagAdapter
-
-            adapter = VertexRagAdapter()
-            try:
-                raw_chunks = adapter.query_rag_corpus(query_text=query, top_k=top_k)
-                keep, low_conf = _filter_rag_hits_by_score(
-                    [rc.score for rc in raw_chunks]
+        adapter = ChromaAdapter()
+        try:
+            embeddings_model = get_embeddings()
+            query_embedding = embeddings_model.embed_query(query)
+            raw_chunks = adapter.query(query_embedding, top_k=top_k)
+            results = []
+            for rc in raw_chunks:
+                source = rc.chunk.metadata or "General Knowledge"
+                results.append(
+                    f"**Source:** {source}\n"
+                    + _clip_with_truncation_notice(
+                        rc.chunk.text,
+                        settings.RAG_HIT_EXCERPT_CHARS,
+                        label=str(source),
+                    )
                 )
-                strong = [rc for rc, k in zip(raw_chunks, keep) if k]
-                if not strong or low_conf:
-                    return {
-                        "status": "low_confidence",
-                        "report": _RAG_LOW_CONFIDENCE_REPORT,
-                    }
-                results = []
-                for rc in strong:
-                    source = rc.chunk.metadata.get("source_path") or "General Knowledge"
-                    results.append(
-                        f"**Source:** {source}\n"
-                        + _clip_with_truncation_notice(
-                            rc.chunk.text,
-                            settings.RAG_HIT_EXCERPT_CHARS,
-                            label=source,
-                        )
-                    )
-                return {"status": "success", "report": "\n\n---\n\n".join(results)}
-            except Exception as e:
-                return {"status": "error", "error_message": str(e)}
-        else:
-            from rubik_core.adapters.chroma import ChromaAdapter
-
-            adapter = ChromaAdapter()
-            try:
-                embeddings_model = get_embeddings()
-                query_embedding = embeddings_model.embed_query(query)
-                raw_chunks = adapter.query(query_embedding, top_k=top_k)
-                results = []
-                for rc in raw_chunks:
-                    source = rc.chunk.metadata or "General Knowledge"
-                    results.append(
-                        f"**Source:** {source}\n"
-                        + _clip_with_truncation_notice(
-                            rc.chunk.text,
-                            settings.RAG_HIT_EXCERPT_CHARS,
-                            label=str(source),
-                        )
-                    )
-                if not results:
-                    return {
-                        "status": "success",
-                        "report": "No relevant documents found.",
-                    }
-                return {"status": "success", "report": "\n\n---\n\n".join(results)}
-            except Exception as e:
-                return {"status": "error", "error_message": str(e)}
+            if not results:
+                return {
+                    "status": "success",
+                    "report": "No relevant documents found.",
+                }
+            return {"status": "success", "report": "\n\n---\n\n".join(results)}
+        except Exception as e:
+            return {"status": "error", "error_message": str(e)}
 
     async def search_my_files(self, query: str, file_name: str = "") -> dict:
         """Search the files THIS person uploaded to Ask Cubie themselves: their own

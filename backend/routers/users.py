@@ -23,7 +23,7 @@ from backend.jobs.launcher import (
 from backend.models.role import ResourcePermissions, Role
 from rubik_core.auth.permissions import visible_permissions
 from rubik_core.auth.registry import UserProfile
-from rubik_core.config import settings
+from rubik_core.config import AppMode, settings
 from rubik_core.control.repository import is_platform_admin
 from rubik_core.database.db import get_db
 from rubik_core.scripts.sync_meet_transcripts import run_sync
@@ -295,16 +295,17 @@ async def create_user(
         },
     )
 
-    # Trigger historical sync (90 days) — on the cubie-worker Cloud Run Job
-    # (#9): minutes of Workspace-API + RAG-import work that a BackgroundTask
-    # on the CPU-throttled web service could silently never finish.
-    submit_background_work(
-        background_tasks,
-        module="rubik_core.scripts.sync_meet_transcripts",
-        args=["--users", user.email, "--days", "90"],
-        fallback=partial(run_sync, user_emails=[user.email], days_ago=90),
-        label=f"user-create-transcript-sync:{user.email}",
-    )
+    # A mock-admin preview can create local demo users but must never touch
+    # real Workspace transcripts through a historical sync.
+    if settings.APP_MODE != AppMode.DEV_MOCK_AUTH:
+        # Run the 90-day import on cubie-worker; it outlives a web request.
+        submit_background_work(
+            background_tasks,
+            module="rubik_core.scripts.sync_meet_transcripts",
+            args=["--users", user.email, "--days", "90"],
+            fallback=partial(run_sync, user_emails=[user.email], days_ago=90),
+            label=f"user-create-transcript-sync:{user.email}",
+        )
 
     return user
 

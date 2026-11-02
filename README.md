@@ -205,6 +205,8 @@ send `X-Mock-User: dev@rubik-soft.com` with `Authorization: Bearer mock-token`.
 login page offers **Enter local preview**. The button checks that the local
 backend accepts mock authentication before signing in as `CUBIE_DEV_USER_EMAIL`
 (default `dev@acme.example`). The local setup provisions domains and admins.
+Mock sign-in skips automatic transcript sync. Local preview also blocks manual
+and scheduled transcript sweeps and skips historical sync when creating a user.
 Features keyed to the company's domain use that workspace's
 verified primary domain. The AI Priorities batches, their
 Slack DM, the Loose Ends scan and the CRM Sync sweep never read a mailbox on a

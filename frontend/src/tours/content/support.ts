@@ -32,7 +32,7 @@ export const tours: readonly PageTour[] = [
             {
                 id: 'workspace-access',
                 title: 'Set up the workspace',
-                body: 'Under Workspace, see company domains and available areas. Workspace admins can set HubSpot details, the business time zone, report audience, sender details, client-owned AI providers for compatible Chat, Sales, summary and scheduled work, choose knowledge search embeddings by collection, and allow extra Gmail accounts.',
+                body: 'Under Workspace, see domains and areas. Set HubSpot details, the business clock, report audience, senders, client-owned AI providers, and extra Gmail accounts. Rebuild knowledge indexes by collection; cloud progress appears here.',
             },
             {
                 id: 'feature-access',
@@ -64,7 +64,7 @@ export const tours: readonly PageTour[] = [
             {
                 id: 'multi-gmail',
                 title: 'Let people connect another mailbox',
-                body: 'This switch starts off. Enable it to let people connect another Gmail account. Their work inbox stays the default. Connected mailboxes feed each owner’s labeled AI Priorities and scheduled summaries; personal mail stays out of team and manager views.',
+                body: 'This switch starts off. Enable it after Google OAuth setup to let people connect another Gmail account. Their work inbox stays the default. Turning it off pauses extra reads and AI runs while owners can still disconnect.',
                 target: 'admin-workspace-multi-gmail',
                 placement: 'top',
             },
@@ -103,6 +103,25 @@ export const tours: readonly PageTour[] = [
                 id: 'embedding-index',
                 title: 'Rebuild before changing the embedding model',
                 body: 'Choose a knowledge collection, rebuild and verify its search index, then activate it. Search keeps using the current index until activation. Cloud workspaces store client-owned vectors in their own database and sync document updates.',
+                target: 'admin-embedding-index',
+                placement: 'top',
+            },
+        ],
+    },
+
+    {
+        id: 'admin.new.embedding-index-background-rebuild',
+        kind: 'new',
+        routes: ['/admin'],
+        query: { tab: 'workspace' },
+        title: 'Background index rebuilds',
+        helpTopic: 'admins',
+        since: '2026-11-02',
+        steps: [
+            {
+                id: 'embedding-index-background',
+                title: 'Leave this page while the index builds',
+                body: 'Cloud index rebuilds run in a background job. You can see progress here, retry a stopped run, and activate only after the new version is verified. Search keeps using the previous index until activation.',
                 target: 'admin-embedding-index',
                 placement: 'top',
             },

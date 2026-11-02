@@ -23,16 +23,25 @@ class TokenAwareChunker:
         self.chunk_overlap = chunk_overlap
 
         try:
-            self.encoder = tiktoken.encoding_for_model(model_name)
+            try:
+                self.encoder = tiktoken.encoding_for_model(model_name)
+            except Exception:
+                self.encoder = tiktoken.get_encoding("cl100k_base")
+            self.splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+                encoding_name=self.encoder.name,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                separators=["\n\n", "\n", " ", ""],
+            )
         except Exception:
-            self.encoder = tiktoken.get_encoding("cl100k_base")
-
-        self.splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-            encoding_name=self.encoder.name,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", " ", ""],
-        )
+            # tiktoken fetches its vocabulary on first use. Cloud jobs with no
+            # public egress can still index conservatively sized text chunks.
+            self.encoder = None
+            self.splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                separators=["\n\n", "\n", " ", ""],
+            )
 
     def _generate_chunk_id(self, doc_id: str, index: int, text: str) -> str:
         text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]

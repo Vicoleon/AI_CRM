@@ -5,6 +5,8 @@ import { pinnedWorkspaceClient } from './pinnedWorkspaceClient';
 import { tokenMatchesWorkspace } from './workspaceOperationsRequest';
 import { formBelongsToIdentity } from './workspaceAIProviderIdentity';
 import { compatibleRouteProvider } from './workspaceAIProviderSelection';
+import { clearRecoveredPollError, queuedEmbeddingIndex } from './workspaceAIProviderBuildState';
+import type { BuildMessage, EmbeddingIndex } from './workspaceAIProviderBuildState';
 
 type ProviderStatus = {
     connected: boolean;
@@ -19,15 +21,6 @@ type Settings = {
     providers: Record<string, ProviderStatus>;
     routes: Record<string, { provider: string; model: string }>;
 };
-type EmbeddingIndex = {
-    storage: string;
-    client_embeddings_available: boolean;
-    corpora?: { key: string; label: string }[];
-    selected_corpus?: string;
-    active: { provider: string; model: string; dimension: number; version: string };
-    candidate: { provider: string; model: string; dimension: number; version: string } | null;
-};
-
 const LABELS: Record<string, string> = {
     anthropic: 'Claude (Anthropic)', deepseek: 'DeepSeek', openai: 'OpenAI',
     gemini: 'Gemini API', meta: 'Muse (Meta Model API)',
@@ -93,7 +86,7 @@ export function WorkspaceAIProvidersCard({ workspaceSlug }: { workspaceSlug: str
     const [embeddingProvider, setEmbeddingProvider] = useState('vertex_managed');
     const [embeddingModel, setEmbeddingModel] = useState('');
     const [busy, setBusy] = useState(false);
-    const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+    const [message, setMessage] = useState<BuildMessage | null>(null);
     const token = activeToken();
     const identity = useRef({ workspaceSlug, token, epoch: 0 });
     if (identity.current.workspaceSlug !== workspaceSlug || identity.current.token !== token) {
@@ -133,6 +126,31 @@ export function WorkspaceAIProvidersCard({ workspaceSlug }: { workspaceSlug: str
         return () => { cancelled = true; };
     }, [workspaceSlug, token]);
 
+    const buildState = embeddingIndex?.build?.status;
+    useEffect(() => {
+        if (!workspaceSlug || !token || !isTokenValid(token) || (buildState !== 'queued' && buildState !== 'running')) return;
+        const epoch = identity.current.epoch;
+        let cancelled = false;
+        let inFlight = false;
+        const timer = window.setInterval(() => {
+            if (cancelled || inFlight || identity.current.epoch !== epoch || activeToken() !== token || !isTokenValid(token) || !tokenMatchesWorkspace(token, workspaceSlug, import.meta.env.DEV)) return;
+            inFlight = true;
+            const corpus = embeddingCorpusRef.current;
+            const request = pinnedWorkspaceClient({ slug: workspaceSlug, token, headers: impersonationHeaders() });
+            request.get<EmbeddingIndex>(`/api/admin/workspace/ai/embedding-index?corpus=${encodeURIComponent(corpus)}`).then(response => {
+                if (!cancelled && identity.current.epoch === epoch && activeToken() === token && embeddingCorpusRef.current === corpus) {
+                    setEmbeddingIndex(response.data);
+                    setMessage(clearRecoveredPollError);
+                }
+            }).catch(error => {
+                if (!cancelled && identity.current.epoch === epoch && activeToken() === token && embeddingCorpusRef.current === corpus) {
+                    setMessage({ kind: 'error', text: detail(error), source: 'poll' });
+                }
+            }).finally(() => { inFlight = false; });
+        }, 3000);
+        return () => { cancelled = true; window.clearInterval(timer); };
+    }, [buildState, workspaceSlug, token]);
+
     const requestForCurrentIdentity = () => {
         const currentToken = activeToken();
         if (!formBelongsToIdentity(formEpoch, identity.current.epoch) || !workspaceSlug || !currentToken || !isTokenValid(currentToken) || !tokenMatchesWorkspace(currentToken, workspaceSlug, import.meta.env.DEV) || currentToken !== token) {
@@ -165,7 +183,7 @@ export function WorkspaceAIProvidersCard({ workspaceSlug }: { workspaceSlug: str
             if (embeddingCorpusRef.current === corpus) setMessage({ kind: 'error', text: detail(error) });
         }
     };
-    const run = async (work: (request: ReturnType<typeof pinnedWorkspaceClient>) => Promise<void>, success: string, clearKey = false) => {
+    const run = async (work: (request: ReturnType<typeof pinnedWorkspaceClient>, epoch: number) => Promise<void>, success: string, clearKey = false, refreshAfterWork = true) => {
         if (busy || !formBelongsToIdentity(formEpoch, identity.current.epoch)) return;
         let epoch = identity.current.epoch;
         setBusy(true);
@@ -173,9 +191,9 @@ export function WorkspaceAIProvidersCard({ workspaceSlug }: { workspaceSlug: str
         try {
             const current = requestForCurrentIdentity();
             epoch = current.epoch;
-            await work(current.request);
+            await work(current.request, epoch);
             if (clearKey && isCurrent(epoch)) setApiKey('');
-            await refresh(current.request, epoch);
+            if (refreshAfterWork) await refresh(current.request, epoch);
             if (isCurrent(epoch)) {
                 setMessage({ kind: 'success', text: success });
             }
@@ -263,6 +281,8 @@ export function WorkspaceAIProvidersCard({ workspaceSlug }: { workspaceSlug: str
                     </label>}
                     {embeddingIndex.corpora && embeddingIndex.corpora.length === 0 && <p className="text-xs text-amber-700">No knowledge collection is provisioned for this workspace yet.</p>}
                     <p className="text-xs text-gray-600">Active: {LABELS[embeddingIndex.active.provider] ?? embeddingIndex.active.provider} · {embeddingIndex.active.model} · {embeddingIndex.active.dimension} dimensions</p>
+                    {(embeddingIndex.build?.status === 'queued' || embeddingIndex.build?.status === 'running') && <p role="status" className="text-xs text-blue-800">Rebuilding index in the background · {embeddingIndex.build.completed_sources ?? 0}{embeddingIndex.build.total_sources == null ? '' : ` of ${embeddingIndex.build.total_sources}`} sources checked. You can leave this page.</p>}
+                    {(embeddingIndex.build?.status === 'failed' || embeddingIndex.build?.status === 'stalled') && <p role="status" className="text-xs text-red-700">{embeddingIndex.build.error ?? 'The rebuild stopped. Please retry.'}</p>}
                     {!embeddingIndex.client_embeddings_available ? <p className="text-xs text-amber-700">This workspace’s search storage cannot use client-owned embeddings yet.</p> : <>
                         <div className="grid gap-2 sm:grid-cols-2">
                             <select aria-label="Embedding provider" disabled={busy} value={selectedEmbeddingProvider} onChange={event => { setEmbeddingProvider(event.target.value); setEmbeddingModel(''); }} className="rounded-lg border border-gray-300 p-2 text-sm">
@@ -272,12 +292,17 @@ export function WorkspaceAIProvidersCard({ workspaceSlug }: { workspaceSlug: str
                                 {embeddingModels.map(name => <option key={name} value={name}>{name}</option>)}
                             </select>
                         </div>
-                        <button disabled={busy || !selectedEmbeddingModel || embeddingIndex.corpora?.length === 0} onClick={() => run(async request => {
-                            await request.post('/api/admin/workspace/ai/embedding-index/prepare', { provider: selectedEmbeddingProvider, model: selectedEmbeddingModel, corpus: embeddingCorpusRef.current === 'default' ? embeddingIndex.selected_corpus ?? 'default' : embeddingCorpusRef.current });
-                        }, 'Embedding index rebuilt. Review and activate it.')} className="rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50">Rebuild index</button>
+                        <button disabled={busy || !selectedEmbeddingModel || embeddingIndex.corpora?.length === 0 || embeddingIndex.build?.status === 'queued' || embeddingIndex.build?.status === 'running'} onClick={() => run(async (request, epoch) => {
+                            const selectedCorpus = embeddingCorpusRef.current;
+                            const corpus = selectedCorpus === 'default' ? embeddingIndex.selected_corpus ?? 'default' : selectedCorpus;
+                            const response = await request.post<{ run_id?: string }>('/api/admin/workspace/ai/embedding-index/prepare', { provider: selectedEmbeddingProvider, model: selectedEmbeddingModel, corpus });
+                            if (embeddingIndex.storage === 'cloud_sql_pgvector' && isCurrent(epoch) && embeddingCorpusRef.current === selectedCorpus) {
+                                setEmbeddingIndex(loaded => queuedEmbeddingIndex(loaded, response.data.run_id));
+                            }
+                        }, embeddingIndex.storage === 'cloud_sql_pgvector' ? 'Rebuild started. Progress appears below.' : 'Embedding index rebuilt. Review and activate it.', false, embeddingIndex.storage !== 'cloud_sql_pgvector')} className="rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:opacity-50">Rebuild index</button>
                         {embeddingIndex.candidate && <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-2">
                             <p className="text-xs text-blue-900">Ready: {LABELS[embeddingIndex.candidate.provider] ?? embeddingIndex.candidate.provider} · {embeddingIndex.candidate.model} · {embeddingIndex.candidate.dimension} dimensions</p>
-                            <button disabled={busy} onClick={() => run(async request => {
+                            <button disabled={busy || Boolean(embeddingIndex.build && (embeddingIndex.build.status !== 'ready' || embeddingIndex.build.id == null))} onClick={() => run(async request => {
                                 await request.post('/api/admin/workspace/ai/embedding-index/activate', { version: embeddingIndex.candidate?.version, corpus: embeddingCorpusRef.current === 'default' ? embeddingIndex.selected_corpus ?? 'default' : embeddingCorpusRef.current });
                             }, 'Embedding index activated.')} className="rounded-lg bg-brand px-3 py-2 text-sm font-medium text-white disabled:opacity-50">Activate rebuilt index</button>
                         </div>}

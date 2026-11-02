@@ -38,6 +38,7 @@ export ENABLE_MOCK_AUTH=true
 export CUBIE_DEV_USER_EMAIL="${CUBIE_DEV_USER_EMAIL:-dev@acme.example}"
 export FRONTEND_URL="http://127.0.0.1:${CUBIE_DEV_WEB_PORT:-5173}"
 export VITE_API_TARGET="http://127.0.0.1:${CUBIE_DEV_API_PORT:-8001}"
+export VITE_DEV_LOCAL_PREVIEW=true
 export LOCAL_DATA_DIR="$DATA_DIR"
 export WORKSPACE_DATABASE_DIR="$DATA_DIR/workspace-dbs"
 export CONTROL_DATABASE_URL="sqlite:///$DATA_DIR/control.db"

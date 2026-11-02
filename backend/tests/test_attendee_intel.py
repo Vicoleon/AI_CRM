@@ -529,9 +529,7 @@ def test_web_search_uses_selected_grounding_route_without_managed_vertex(monkeyp
         "test", "people_web_search", "gemini", "gemini-2.5-pro", "client"
     )
     observed = []
-    monkeypatch.setattr(
-        web_search, "resolve_model_route", lambda *a, **kw: route
-    )
+    monkeypatch.setattr(web_search, "resolve_model_route", lambda *a, **kw: route)
     monkeypatch.setattr(
         web_search,
         "llm_grounded",
@@ -540,10 +538,15 @@ def test_web_search_uses_selected_grounding_route_without_managed_vertex(monkeyp
     monkeypatch.setattr(
         web_search,
         "generate_grounded_text_on_route",
-        lambda *a, **kw: observed.append((a, kw))
-        or ModelTextResponse(
-            "Grounded research", "gemini", route.model, "client",
-            citation_urls=("https://example.com/person",),
+        lambda *a, **kw: (
+            observed.append((a, kw))
+            or ModelTextResponse(
+                "Grounded research",
+                "gemini",
+                route.model,
+                "client",
+                citation_urls=("https://example.com/person",),
+            )
         ),
     )
 

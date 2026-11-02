@@ -251,16 +251,9 @@ def test_private_corpus_cache_is_workspace_scoped(monkeypatch):
     assert private_index._corpus_names == {"beta": "corpora/beta"}
 
 
-def test_hubspot_intent_cache_is_scoped_and_bounded(monkeypatch):
+def test_hubspot_intent_cache_is_scoped_and_bounded():
     from rubik_core.retrieval import hubspot
 
-    monkeypatch.setattr(
-        hubspot,
-        "resolve_model_route",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            provider="vertex_managed", model="test-model"
-        ),
-    )
     hubspot.INTENT_CACHE.clear()
     reads = []
 

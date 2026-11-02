@@ -125,6 +125,7 @@ class GmailClient:
         self.owner_email = user_email
         self.account_id = account_id
         self.user_email = user_email
+        self._oauth_refresh_token: str | None = None
         self.service = self._build_service()
 
     def _build_service(self):
@@ -142,6 +143,7 @@ class GmailClient:
                 self.owner_email, self.account_id
             )
             self.user_email = mailbox_email
+            self._oauth_refresh_token = creds.refresh_token
             # Do not catch credential or refresh failures and then try DWD.
             from rubik_core.tools._workspace_auth import safe_refresh
 
@@ -182,6 +184,21 @@ class GmailClient:
             logger.error("Failed to initialize Gmail API service: %s", type(e).__name__)
             return None
 
+    def _assert_extra_account_access(self) -> None:
+        """Recheck access before each selected-mailbox Google operation."""
+        if getattr(self, "account_id", None) is None:
+            return
+        from rubik_core.tenancy.gmail_accounts import get_account_credentials
+
+        creds, mailbox_email = get_account_credentials(
+            self.owner_email, self.account_id
+        )
+        if (
+            creds.refresh_token != self._oauth_refresh_token
+            or mailbox_email != self.user_email
+        ):
+            raise PermissionError("Reconnect this Gmail account")
+
     def search_threads(
         self, query: str = "", max_results: int = 20
     ) -> list[dict[str, Any]]:
@@ -190,6 +207,8 @@ class GmailClient:
         """
         if not self.service:
             raise RuntimeError("Gmail service not initialized.")
+
+        self._assert_extra_account_access()
 
         try:
             results = (
@@ -204,6 +223,7 @@ class GmailClient:
             )
 
             threads = results.get("threads", [])
+            self._assert_extra_account_access()
             return self._hydrate_threads([t["id"] for t in threads])
         except Exception as e:
             logger.error("Failed to search Gmail threads: %s", type(e).__name__)
@@ -220,6 +240,7 @@ class GmailClient:
         """
         if not self.service:
             raise RuntimeError("Gmail service not initialized.")
+        self._assert_extra_account_access()
         params: dict[str, Any] = {
             "userId": "me",
             "q": query,
@@ -232,6 +253,7 @@ class GmailClient:
         except Exception as e:
             logger.error("Failed to list Gmail threads: %s", type(e).__name__)
             raise
+        self._assert_extra_account_access()
         ids = [t["id"] for t in results.get("threads", []) if t.get("id")]
         return ids, results.get("nextPageToken") or None
 
@@ -247,6 +269,7 @@ class GmailClient:
         """
         if not thread_ids:
             return []
+        self._assert_extra_account_access()
         threads_api = self.service.users().threads()
         got: dict[str, dict[str, Any]] = {}
 
@@ -255,12 +278,14 @@ class GmailClient:
                 got[request_id] = response
 
         for start in range(0, len(thread_ids), _HYDRATE_BATCH):
+            self._assert_extra_account_access()
             batch = self.service.new_batch_http_request(callback=_cb)
             for i in range(start, min(start + _HYDRATE_BATCH, len(thread_ids))):
                 batch.add(
                     threads_api.get(userId="me", id=thread_ids[i], format="metadata"),
                     request_id=str(i),
                 )
+            self._assert_extra_account_access()
             try:
                 batch.execute()
             except Exception as e:
@@ -271,9 +296,11 @@ class GmailClient:
 
         for i, tid in enumerate(thread_ids):
             if str(i) not in got:
+                self._assert_extra_account_access()
                 got[str(i)] = threads_api.get(
                     userId="me", id=tid, format="metadata"
                 ).execute()
+        self._assert_extra_account_access()
         return [got[str(i)] for i in range(len(thread_ids))]
 
     def get_thread(self, thread_id: str) -> dict[str, Any]:
@@ -283,6 +310,8 @@ class GmailClient:
         if not self.service:
             raise RuntimeError("Gmail service not initialized.")
 
+        self._assert_extra_account_access()
+
         try:
             # format='full' gets the raw body, 'metadata' gets headers
             thread = (
@@ -291,6 +320,7 @@ class GmailClient:
                 .get(userId="me", id=thread_id, format="full")
                 .execute()
             )
+            self._assert_extra_account_access()
             return thread
         except Exception as e:
             logger.error("Failed to get Gmail thread: %s", type(e).__name__)
@@ -311,8 +341,10 @@ class GmailClient:
         """
         if not self.service:
             return ""
+        self._assert_extra_account_access()
         try:
             resp = self.service.users().settings().sendAs().list(userId="me").execute()
+            self._assert_extra_account_access()
             send_as = resp.get("sendAs", []) or []
             if not send_as:
                 return ""
@@ -330,6 +362,8 @@ class GmailClient:
                     send_as[0],
                 )
             return (primary.get("signature") or "").strip()
+        except PermissionError:
+            raise
         except Exception as e:  # noqa: BLE001 — never let this break drafting
             logger.warning("Could not fetch Gmail signature: %s", type(e).__name__)
             return ""
@@ -368,6 +402,8 @@ class GmailClient:
         """
         if not self.service:
             raise RuntimeError("Gmail service not initialized.")
+
+        self._assert_extra_account_access()
 
         try:
             message = EmailMessage()
@@ -416,6 +452,9 @@ class GmailClient:
             if thread_id:
                 draft_body["message"]["threadId"] = thread_id
 
+            # The admin may have disabled extra mail while the draft was
+            # assembled or its signature was fetched.
+            self._assert_extra_account_access()
             draft = (
                 self.service.users()
                 .drafts()

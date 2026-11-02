@@ -296,6 +296,24 @@ async def add_upload(
     return Added(row, reused=False)
 
 
+async def _remove_late_private_file(task: asyncio.Task, upload_id: str) -> None:
+    """A timed-out worker may still finish its Vertex upload; remove it."""
+    try:
+        filed = task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+    try:
+        removed = await run_in_threadpool(
+            private_index.remove, filed, upload_id=upload_id
+        )
+        if not removed:
+            logger.error("[chat-files] timed-out private filing needs cleanup")
+    except Exception:
+        logger.exception("[chat-files] timed-out private filing cleanup failed")
+
+
 async def _file_in_library(db: Session, row: ChatUpload) -> None:
     """Put the reading in the private library, or settle for chat-only."""
     if not row.extracted_text:
@@ -303,15 +321,36 @@ async def _file_in_library(db: Session, row: ChatUpload) -> None:
     elif not private_index.available():
         status, note = INDEX_CHAT_ONLY, "The private library isn't available here."
     else:
+        upload_id = row.id
+        filing = asyncio.create_task(
+            run_in_threadpool(
+                private_index.add_document, upload_id, library_document(row)
+            )
+        )
+
+        def schedule_cleanup(task: asyncio.Task) -> None:
+            asyncio.create_task(_remove_late_private_file(task, upload_id))
+
         try:
             row.rag_file_name = await asyncio.wait_for(
-                run_in_threadpool(
-                    private_index.add_document, row.id, library_document(row)
-                ),
+                asyncio.shield(filing),
                 timeout=settings.CHAT_FILE_INDEX_TIMEOUT_SECONDS,
             )
             status, note = INDEX_PRIVATE, None
-        except (private_index.PrivateIndexError, asyncio.TimeoutError) as exc:
+        except asyncio.TimeoutError:
+            # Cancelling a threadpool await does not stop its Vertex request.
+            # Keep its result and compensate if it finishes after this row is
+            # marked chat-only.
+            filing.add_done_callback(schedule_cleanup)
+            logger.warning("[chat-files] filing timed out")
+            status, note = (
+                INDEX_CHAT_ONLY,
+                f"{PRODUCT_NAME} couldn't file it in your private library.",
+            )
+        except asyncio.CancelledError:
+            filing.add_done_callback(schedule_cleanup)
+            raise
+        except private_index.PrivateIndexError as exc:
             logger.warning("[chat-files] filing failed: %s", str(exc)[:300])
             status, note = (
                 INDEX_CHAT_ONLY,
@@ -325,7 +364,7 @@ async def _file_in_library(db: Session, row: ChatUpload) -> None:
     except Exception:  # noqa: BLE001 — the file was deleted while being filed
         db.rollback()
         if filed:
-            private_index.remove(filed)
+            private_index.remove(filed, upload_id=row.id)
         raise ChatFileError(
             f"That file was removed while {PRODUCT_NAME} was reading it."
         ) from None

@@ -34,9 +34,13 @@ from vertexai.preview import rag as vertex_rag
 
 from rubik_core.ai_providers.cloud_rag_bridge import (
     begin_cloud_source_update,
-    fail_cloud_source_update,
+    cloud_source_mutation_lock,
+    confirm_managed_source_update,
     finish_cloud_source_update,
     query_cloud_resource,
+    settle_failed_managed_update,
+    source_is_published,
+    source_referencing_corpora,
 )
 from rubik_core.ai_providers.cloud_vector_index import CloudVectorIndexError
 from rubik_core.config import settings
@@ -46,7 +50,9 @@ from rubik_core.rag.config import (
     build_registry,
     current_registry,
     is_exec_only_slug,
+    slugify_department,
 )
+from rubik_core.rag.import_result import require_one_imported
 from rubik_core.tenancy.context import current_workspace
 from rubik_core.tenancy.corpora import (
     assert_own_rag_file,
@@ -224,9 +230,26 @@ class RagManager:
         """Create any missing corpora across the entire registry."""
         return {slug: self._resolve_corpus(slug) for slug in self.registry}
 
+    def corpus_for_asset(self, department: str | None, is_company_wide: bool) -> str:
+        """Resolve a DAM asset's saved audience to its bound RAG corpus."""
+        if is_company_wide:
+            slug = COMPANYWIDE_SLUG
+        else:
+            slug = slugify_department(department or "")
+            if not slug or slug == COMPANYWIDE_SLUG or is_exec_only_slug(slug):
+                raise RagOperationError("Asset has no valid knowledge audience")
+        return self._resolve_corpus(slug, create_if_missing=False)
+
     # ─────────────────────────────────────────────────────────────────────
     # GCS helpers
     # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _require_exclusive_source(corpus_name: str, uri: str) -> None:
+        if source_referencing_corpora(corpus_name, uri) - {corpus_name}:
+            raise CloudVectorIndexError(
+                "RAG source is already published in another bound corpus"
+            )
 
     def _gcs_blob_name(self, spec: RagSpec, file_name: str) -> str:
         """Compose the GCS blob path: `<prefix>/<rag-subprefix>/<file>`."""
@@ -286,8 +309,12 @@ class RagManager:
     def _import_to_corpus(self, corpus_name: str, gcs_uri: str) -> None:
         require_bound_corpus_id(corpus_name)
         assert_own_uri(gcs_uri)
-        """Import a GCS URI into a Vertex RAG corpus, retrying around the
-        Vertex "other operations running" precondition error."""
+        with cloud_source_mutation_lock(corpus_name, gcs_uri):
+            self._import_to_corpus_locked(corpus_name, gcs_uri)
+
+    def _import_to_corpus_locked(self, corpus_name: str, gcs_uri: str) -> None:
+        """Import under the source lock, including retries and vector sync."""
+        self._require_exclusive_source(corpus_name, gcs_uri)
         source_update = begin_cloud_source_update(
             corpus_name, gcs_uri, "upsert", client=self.gcs_client
         )
@@ -300,6 +327,7 @@ class RagManager:
                     chunk_size=512,
                     chunk_overlap=50,
                 )
+                require_one_imported(response)
             except Exception as e:
                 err_str = str(e).lower()
                 # Vertex throws this when another long-running op is in flight on
@@ -324,16 +352,26 @@ class RagManager:
                 logger.exception(
                     "RAG import failed | corpus=%s | uri=%s", corpus_name, gcs_uri
                 )
-                fail_cloud_source_update(source_update)
-                raise RagOperationError(
-                    f"import_files failed for {gcs_uri}: {e}"
-                ) from e
+                if source_update is not None:
+                    try:
+                        if settle_failed_managed_update(
+                            corpus_name,
+                            gcs_uri,
+                            "upsert",
+                            source_update,
+                            client=self.gcs_client,
+                        ):
+                            return
+                    except Exception:
+                        logger.warning("RAG import state needs vector repair")
+                raise RagOperationError("RAG import failed") from e
             logger.info(
                 "RAG import OK | corpus=%s | uri=%s | response=%s",
                 corpus_name,
                 gcs_uri,
                 response,
             )
+            confirm_managed_source_update(source_update)
             finish_cloud_source_update(
                 corpus_name,
                 gcs_uri,
@@ -342,7 +380,18 @@ class RagManager:
                 client=self.gcs_client,
             )
             return
-        fail_cloud_source_update(source_update)
+        if source_update is not None:
+            try:
+                if settle_failed_managed_update(
+                    corpus_name,
+                    gcs_uri,
+                    "upsert",
+                    source_update,
+                    client=self.gcs_client,
+                ):
+                    return
+            except Exception:
+                logger.warning("RAG import state needs vector repair")
         raise RagOperationError(
             f"import_files exhausted retries for {gcs_uri} on {corpus_name}"
         )
@@ -509,8 +558,13 @@ class RagManager:
             raise RagOperationError(f"add_document: file not found: {path}")
 
         corpus_name = self._resolve_corpus(spec.slug)
-        gcs_uri = self._upload_to_gcs(spec, path)
-        self._import_to_corpus(corpus_name, gcs_uri)
+        target_uri = f"gs://{self.bucket_name}/{self._gcs_blob_name(spec, path.name)}"
+        with cloud_source_mutation_lock(corpus_name, target_uri):
+            self._require_exclusive_source(corpus_name, target_uri)
+            gcs_uri = self._upload_to_gcs(spec, path)
+            if gcs_uri != target_uri:
+                raise RagOperationError("RAG upload returned an unexpected source URI")
+            self._import_to_corpus_locked(corpus_name, gcs_uri)
         return {"rag": spec.slug, "gcs_uri": gcs_uri, "corpus_name": corpus_name}
 
     def list_documents(self, slug: str) -> list[RagDocument]:
@@ -632,6 +686,24 @@ class RagManager:
             )
             if target_gcs not in matched_uris:
                 raise ValueError("RAG file and stored URI do not match")
+        if target_gcs:
+            with cloud_source_mutation_lock(corpus_name, target_gcs):
+                return self._delete_verified_document(
+                    spec, corpus_name, target_file, target_gcs, also_delete_gcs
+                )
+        return self._delete_verified_document(
+            spec, corpus_name, target_file, target_gcs, also_delete_gcs
+        )
+
+    def _delete_verified_document(
+        self,
+        spec: RagSpec,
+        corpus_name: str,
+        target_file: str,
+        target_gcs: str | None,
+        also_delete_gcs: bool,
+    ) -> dict[str, bool]:
+        """Apply a verified delete while the selected source lock is held."""
         source_update = (
             begin_cloud_source_update(
                 corpus_name, target_gcs, "delete", client=self.gcs_client
@@ -645,6 +717,7 @@ class RagManager:
             if any(cloud_index_versions(corpus_name)):
                 raise RagOperationError("Vector source URI is required for deletion")
         rag_ok = False
+        settled = False
         try:
             vertex_rag.delete_file(name=target_file)
             logger.info(
@@ -654,14 +727,30 @@ class RagManager:
                 target_gcs,
             )
             rag_ok = True
+            confirm_managed_source_update(source_update)
         except Exception as e:
-            fail_cloud_source_update(source_update)
+            if source_update is not None:
+                try:
+                    if settle_failed_managed_update(
+                        corpus_name,
+                        target_gcs,
+                        "delete",
+                        source_update,
+                        client=self.gcs_client,
+                    ):
+                        rag_ok = True
+                        settled = True
+                    else:
+                        raise RagOperationError("RAG deletion did not complete")
+                except Exception:
+                    logger.warning("RAG delete state needs vector repair")
             logger.exception(
                 "rag.delete_file failed | rag=%s | file=%s", spec.slug, target_file
             )
-            raise RagOperationError(f"rag.delete_file failed: {e}") from e
+            if not rag_ok:
+                raise RagOperationError("RAG deletion failed") from e
 
-        if target_gcs:
+        if target_gcs and not settled:
             finish_cloud_source_update(
                 corpus_name,
                 target_gcs,
@@ -672,7 +761,8 @@ class RagManager:
 
         gcs_ok = False
         if also_delete_gcs and target_gcs:
-            gcs_ok = self._delete_from_gcs(target_gcs)
+            if not source_is_published(corpus_name, target_gcs):
+                gcs_ok = self._delete_from_gcs(target_gcs)
 
         return {"rag_deleted": rag_ok, "gcs_deleted": gcs_ok}
 
@@ -689,6 +779,15 @@ class RagManager:
         corpus_name = self._resolve_corpus(spec.slug)
         target_blob = self._gcs_blob_name(spec, path.name)
         target_uri = f"gs://{self.bucket_name}/{target_blob}"
+        with cloud_source_mutation_lock(corpus_name, target_uri):
+            return self._update_document_locked(spec, path, corpus_name, target_uri)
+
+    def _update_document_locked(
+        self, spec: RagSpec, path: Path, corpus_name: str, target_uri: str
+    ) -> dict[str, str]:
+        """Delete, overwrite GCS, and reimport under one source lock."""
+
+        self._require_exclusive_source(corpus_name, target_uri)
 
         try:
             existing = list(vertex_rag.list_files(corpus_name=corpus_name))
@@ -705,8 +804,29 @@ class RagManager:
                 stale_update = begin_cloud_source_update(
                     corpus_name, target_uri, "delete", client=self.gcs_client
                 )
+                settled = False
                 try:
                     vertex_rag.delete_file(name=f.name)
+                except Exception as e:
+                    if stale_update is not None:
+                        try:
+                            settled = settle_failed_managed_update(
+                                corpus_name,
+                                target_uri,
+                                "delete",
+                                stale_update,
+                                client=self.gcs_client,
+                            )
+                        except Exception:
+                            logger.warning("Stale RAG deletion needs vector repair")
+                    if not settled:
+                        logger.exception(
+                            "update_document: failed to delete stale ragFile %s",
+                            f.name,
+                        )
+                        raise RagOperationError("Stale RAG file deletion failed") from e
+                else:
+                    confirm_managed_source_update(stale_update)
                     finish_cloud_source_update(
                         corpus_name,
                         target_uri,
@@ -714,22 +834,15 @@ class RagManager:
                         stale_update,
                         client=self.gcs_client,
                     )
-                    logger.info(
-                        "update_document: removed stale ragFile %s before re-import",
-                        f.name,
-                    )
-                except Exception as e:
-                    fail_cloud_source_update(stale_update)
-                    logger.exception(
-                        "update_document: failed to delete stale ragFile %s", f.name
-                    )
-                    raise RagOperationError(
-                        f"update_document: failed to remove stale ragFile {f.name}: {e}"
-                    ) from e
-                break
+                logger.info(
+                    "update_document: removed stale ragFile %s before re-import",
+                    f.name,
+                )
 
         gcs_uri = self._upload_to_gcs(spec, path)
-        self._import_to_corpus(corpus_name, gcs_uri)
+        if gcs_uri != target_uri:
+            raise RagOperationError("RAG upload returned an unexpected source URI")
+        self._import_to_corpus_locked(corpus_name, gcs_uri)
         return {"rag": spec.slug, "gcs_uri": gcs_uri, "corpus_name": corpus_name}
 
 

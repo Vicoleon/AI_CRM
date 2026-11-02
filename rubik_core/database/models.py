@@ -2158,18 +2158,22 @@ class CloudVectorUpdate(Base):
     __tablename__ = "cloud_vector_updates"
 
     id = Column(String(36), primary_key=True)
-    sequence = Column(BigInteger, nullable=False, unique=True)
+    sequence = Column(BigInteger, nullable=False)
     corpus = Column(String(40), nullable=False)
     source_key = Column(String(64), nullable=False)
     source_uri = Column(String(2048), nullable=False)
     generation = Column(BigInteger, nullable=False)
     operation = Column(String(8), nullable=False)
     status = Column(String(16), nullable=False, default="pending")
+    managed_applied = Column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     attempts = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     applied_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
+        UniqueConstraint("sequence", name="uq_cloud_vector_updates_sequence"),
         Index("ix_cloud_vector_updates_pending", "corpus", "status"),
         Index("ix_cloud_vector_updates_source_seq", "corpus", "source_key", "sequence"),
     )

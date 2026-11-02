@@ -91,7 +91,7 @@ export const tours: readonly PageTour[] = [
             {
                 id: 'review',
                 title: 'You choose after a model change',
-                body: 'If your admin changes the AI Priorities model, Cubie pauses automatic use of your extra Gmail until you review the new provider here. You can still open the mailbox manually.',
+                body: 'If your admin changes the AI Priorities model, Cubie pauses automatic use of your extra Gmail until you review it here. Expired Google access needs reconnection. If Google setup is incomplete, your work mailbox still works.',
                 target: 'settings-gmail-accounts',
                 placement: 'bottom',
             },

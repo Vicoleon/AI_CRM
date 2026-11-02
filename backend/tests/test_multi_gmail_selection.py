@@ -11,7 +11,7 @@ def test_selected_gmail_uses_only_owner_bound_oauth_credentials(monkeypatch):
     from rubik_core.tenancy import gmail_accounts
     from rubik_core.tools import _workspace_auth, gmail
 
-    credential = object()
+    credential = SimpleNamespace(refresh_token="test-refresh-token")
     calls = []
     monkeypatch.setattr(
         gmail_accounts,

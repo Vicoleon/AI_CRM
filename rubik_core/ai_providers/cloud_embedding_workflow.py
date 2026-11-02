@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import vertexai
 from sqlalchemy import select
@@ -47,6 +49,169 @@ from rubik_core.tenancy.corpora import (
 from rubik_core.tenancy.storage import assert_own_uri
 
 _CONNECTOR = "ai_embedding_indexes"
+_ACTIVE_BUILD_STATES = frozenset({"queued", "running"})
+_BUILD_LEASE = timedelta(minutes=30)
+_EMBED_BATCH = 32
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _stale_build(build: object) -> bool:
+    if not isinstance(build, dict) or build.get("status") not in _ACTIVE_BUILD_STATES:
+        return False
+    try:
+        updated = datetime.fromisoformat(build["updated_at"])
+        return datetime.now(timezone.utc) - updated > _BUILD_LEASE
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
+def _update_build(corpus_key: str, run_id: str, *, status: str, **fields: Any) -> bool:
+    """Update only the still-current build; old Jobs cannot overwrite a retry."""
+    slug = current_workspace()
+    with control_session() as db:
+        row = db.get(WorkspaceConnector, (slug, _CONNECTOR), with_for_update=True)
+        if row is None:
+            return False
+        config = dict(row.config or {})
+        corpora = dict(config.get("corpora") or {})
+        item = dict(corpora.get(corpus_key) or {})
+        build = dict(item.get("build") or {})
+        if build.get("id") != run_id:
+            return False
+        item["build"] = {**build, **fields, "status": status, "updated_at": _now()}
+        corpora[corpus_key] = item
+        row.config = {**config, "corpora": corpora}
+        db.commit()
+    return True
+
+
+def _assert_current_build(corpus_key: str, run_id: str) -> None:
+    slug = current_workspace()
+    with control_session() as db:
+        row = db.get(WorkspaceConnector, (slug, _CONNECTOR))
+        config = row.config if row is not None else None
+        corpora = config.get("corpora") if isinstance(config, dict) else None
+        item = corpora.get(corpus_key) if isinstance(corpora, dict) else None
+        build = item.get("build") if isinstance(item, dict) else None
+    if (
+        not isinstance(build, dict)
+        or build.get("id") != run_id
+        or build.get("status") != "running"
+    ):
+        raise CloudVectorIndexError("Embedding rebuild was replaced; start a new one")
+
+
+def queue_cloud_embedding_rebuild(
+    provider: str, model: str, *, corpus: str = "default"
+) -> dict[str, str]:
+    """Persist one non-secret request before dispatching a Cloud Run Job."""
+    _cloud_only()
+    if provider not in ("openai", "gemini"):
+        raise IncompatibleModelRoute("Cloud client embeddings support OpenAI or Gemini")
+    resource = _bound_resource(corpus)
+    from rubik_core.ai_providers.embedding_index import cloud_corpus_key
+
+    key = cloud_corpus_key(resource)
+    embedding_dimension(provider, model)
+    provider_connection_route(
+        provider, model, feature="embedding_index", capability="embedding"
+    )
+    run_id = uuid.uuid4().hex
+    with control_session() as db:
+        slug = current_workspace()
+        row = db.get(WorkspaceConnector, (slug, _CONNECTOR), with_for_update=True)
+        if row is None:
+            row = WorkspaceConnector(workspace_slug=slug, connector=_CONNECTOR)
+            db.add(row)
+        config = dict(row.config or {})
+        corpora = dict(config.get("corpora") or {})
+        item = dict(corpora.get(key) or {})
+        existing = item.get("build")
+        if (
+            isinstance(existing, dict)
+            and existing.get("status") in _ACTIVE_BUILD_STATES
+            and not _stale_build(existing)
+        ):
+            raise IncompatibleModelRoute("An embedding rebuild is already running")
+        item["build"] = {
+            "id": run_id,
+            "status": "queued",
+            "provider": provider,
+            "model": model,
+            "completed_sources": 0,
+            "total_sources": None,
+            "created_at": _now(),
+            "updated_at": _now(),
+            "error": None,
+        }
+        corpora[key] = item
+        row.config = {**config, "corpora": corpora}
+        row.status = "connected"
+        db.commit()
+    return {"status": "queued", "run_id": run_id, "corpus": key}
+
+
+def fail_cloud_embedding_rebuild(corpus: str, run_id: str) -> None:
+    """Mark a launch failure without exposing Cloud Run response details."""
+    _update_build(
+        corpus,
+        run_id,
+        status="failed",
+        error="The rebuild could not start. Please retry.",
+    )
+
+
+def run_cloud_embedding_rebuild(run_id: str) -> bool:
+    """Run one queued build in a workspace-pinned worker process."""
+    _cloud_only()
+    if not isinstance(run_id, str) or len(run_id) != 32:
+        raise ValueError("Invalid embedding rebuild ID")
+    slug = current_workspace()
+    selected: tuple[str, str, str] | None = None
+    with control_session() as db:
+        row = db.get(WorkspaceConnector, (slug, _CONNECTOR), with_for_update=True)
+        config = dict(row.config or {}) if row else {}
+        corpora = dict(config.get("corpora") or {})
+        for key, item_value in corpora.items():
+            item = dict(item_value or {})
+            build = dict(item.get("build") or {})
+            if build.get("id") != run_id:
+                continue
+            if build.get("status") != "queued":
+                return False
+            selected = (key, build["provider"], build["model"])
+            item["build"] = {**build, "status": "running", "updated_at": _now()}
+            corpora[key] = item
+            row.config = {**config, "corpora": corpora}
+            db.commit()
+            break
+    if selected is None:
+        return False
+    corpus_key, provider, model = selected
+    try:
+        result = prepare_cloud_embedding_index(
+            provider, model, corpus=corpus_key, run_id=run_id
+        )
+    except Exception:
+        _update_build(
+            corpus_key,
+            run_id,
+            status="failed",
+            error="Rebuild failed. Check the provider and knowledge sources, then retry.",
+        )
+        return False
+    return _update_build(
+        corpus_key,
+        run_id,
+        status="ready",
+        version=result["version"],
+        indexed_chunks=result["indexed_chunks"],
+        indexed_sources=result["indexed_sources"],
+        error=None,
+    )
 
 
 def _cloud_only() -> None:
@@ -114,6 +279,66 @@ def _bound_resource(corpus: str) -> str:
     raise IncompatibleModelRoute("Knowledge corpus is not bound to this workspace")
 
 
+def _assert_sources_not_shared(resource: str, uris: set[str]) -> None:
+    """Reject legacy GCS objects claimed by another bound corpus.
+
+    New imports include an opaque corpus key in their object path. Older
+    uploads may share a filename-based URI across audience corpora, so those
+    bytes cannot safely establish an embedding candidate's audience.
+    """
+    slug = current_workspace()
+    with control_session() as db:
+        workspace = db.get(Workspace, slug)
+        if workspace is None or workspace.status != "active":
+            raise CloudVectorIndexError("Active workspace is required")
+        bound = {
+            value
+            for value in (workspace.corpus_ids or {}).values()
+            if isinstance(value, str) and value
+        }
+        bound.update(
+            value
+            for value in db.scalars(
+                select(WorkspaceCorpus.corpus_id).where(
+                    WorkspaceCorpus.workspace_slug == slug
+                )
+            ).all()
+            if isinstance(value, str) and value
+        )
+    if resource not in bound:
+        raise CloudVectorIndexError("Knowledge corpus is not bound to workspace")
+    private = corpus_id("private_uploads", create=False)
+    try:
+        vertexai.init(
+            project=settings.GCP_PROJECT_ID, location=settings.VERTEX_RAG_LOCATION
+        )
+        for other in sorted(bound - {resource}):
+            if other == private:
+                from rubik_core.chat_files.private_index import _verified_ragfiles
+
+                other_uris = _verified_ragfiles(other).values()
+            else:
+                other_uris = []
+                for file in rag.list_files(corpus_name=other):
+                    assert_own_rag_file(getattr(file, "name", None), other)
+                    values = getattr(getattr(file, "gcs_source", None), "uris", None)
+                    if not values or len(values) != 1:
+                        raise CloudVectorIndexError(
+                            "Bound knowledge source cannot be verified"
+                        )
+                    other_uris.append(assert_own_uri(values[0]))
+            if uris.intersection(other_uris):
+                raise CloudVectorIndexError(
+                    "Knowledge source is shared across bound corpora"
+                )
+    except CloudVectorIndexError:
+        raise
+    except Exception:
+        raise CloudVectorIndexError(
+            "Bound knowledge source membership is unavailable"
+        ) from None
+
+
 def _source_uris(resource: str) -> set[str]:
     """Use exact bound-corpus file membership, refusing unindexable sources."""
     require_bound_corpus_id(resource)
@@ -121,11 +346,13 @@ def _source_uris(resource: str) -> set[str]:
         from rubik_core.chat_files.private_index import ensure_cloud_sources
 
         try:
-            return ensure_cloud_sources()
+            uris = ensure_cloud_sources()
         except Exception:
             raise CloudVectorIndexError(
                 "Private knowledge sources cannot be indexed"
             ) from None
+        _assert_sources_not_shared(resource, uris)
+        return uris
     try:
         vertexai.init(
             project=settings.GCP_PROJECT_ID, location=settings.VERTEX_RAG_LOCATION
@@ -153,6 +380,7 @@ def _source_uris(resource: str) -> set[str]:
         if uri in uris:
             raise CloudVectorIndexError("Knowledge source is duplicated")
         uris.add(uri)
+    _assert_sources_not_shared(resource, uris)
     return uris
 
 
@@ -166,7 +394,7 @@ def _snapshot(resource: str) -> dict[str, tuple[int, str]]:
 
 
 def prepare_cloud_embedding_index(
-    provider: str, model: str, *, corpus: str = "default"
+    provider: str, model: str, *, corpus: str = "default", run_id: str | None = None
 ) -> dict[str, object]:
     _cloud_only()
     if provider not in ("openai", "gemini"):
@@ -175,6 +403,8 @@ def prepare_cloud_embedding_index(
     from rubik_core.ai_providers.embedding_index import _cloud_spec, cloud_corpus_key
 
     key = cloud_corpus_key(resource)
+    if run_id:
+        _assert_current_build(key, run_id)
     dimension = embedding_dimension(provider, model)
     route = provider_connection_route(
         provider, model, feature="embedding_index", capability="embedding"
@@ -183,6 +413,13 @@ def prepare_cloud_embedding_index(
     # Snapshot before exposing the candidate; concurrent writes after this point
     # are captured by the outbox and will block activation until reconciled.
     source_uris = _source_uris(resource)
+    if run_id and not _update_build(
+        key,
+        run_id,
+        status="running",
+        total_sources=len(source_uris),
+    ):
+        raise CloudVectorIndexError("Embedding rebuild was replaced")
     spec = CloudVectorSpec(
         current_workspace(), key, provider, model, dimension, uuid.uuid4().hex[:16]
     )
@@ -198,6 +435,14 @@ def prepare_cloud_embedding_index(
             config = dict(row.config or {})
             corpora = dict(config.get("corpora") or {})
             item = dict(corpora.get(key) or {})
+            if run_id:
+                build = item.get("build")
+                if (
+                    not isinstance(build, dict)
+                    or build.get("id") != run_id
+                    or build.get("status") != "running"
+                ):
+                    raise CloudVectorIndexError("Embedding rebuild was replaced")
             previous = item.get("candidate")
             if isinstance(previous, dict):
                 previous_candidate = _cloud_spec(previous.get("spec"), key)
@@ -219,24 +464,46 @@ def prepare_cloud_embedding_index(
     expected: dict[str, tuple[int, str]] = {}
     try:
         with feature_context("embedding_index_rebuild"):
-            for uri in sorted(source_uris):
+            for completed, uri in enumerate(sorted(source_uris), 1):
+                if run_id:
+                    _assert_current_build(key, run_id)
                 source = load_gcs_source(uri)
-                vectors = embed_with_route(
-                    route, [chunk.text for chunk in source.chunks], dimension
-                )
+                vectors: list[list[float]] = []
+                for start in range(0, len(source.chunks), _EMBED_BATCH):
+                    batch = source.chunks[start : start + _EMBED_BATCH]
+                    vectors.extend(
+                        embed_with_route(
+                            route, [chunk.text for chunk in batch], dimension
+                        )
+                    )
+                    if run_id and not _update_build(
+                        key, run_id, status="running", completed_sources=completed - 1
+                    ):
+                        raise CloudVectorIndexError("Embedding rebuild was replaced")
                 chunks = [
                     chunk.model_copy(update={"embedding": vector})
                     for chunk, vector in zip(source.chunks, vectors, strict=True)
                 ]
                 replace_source(spec, uri, source.generation, source.sha256, chunks)
                 expected[uri] = (source.generation, source.sha256)
+                if run_id and not _update_build(
+                    key,
+                    run_id,
+                    status="running",
+                    completed_sources=completed,
+                ):
+                    raise CloudVectorIndexError("Embedding rebuild was replaced")
         from rubik_core.ai_providers.cloud_rag_bridge import reconcile_pending
 
+        if run_id:
+            _assert_current_build(key, run_id)
         reconcile_pending(resource)
         if _snapshot(resource) != expected:
             raise CloudVectorIndexError("Knowledge sources changed; rebuild again")
         verified = verify_candidate(spec, expected)
         build_ann_index(spec)
+        if run_id:
+            _assert_current_build(key, run_id)
     except (CloudSourceError, CloudVectorIndexError, IncompatibleModelRoute):
         raise
     except Exception:
@@ -267,6 +534,16 @@ def activate_cloud_embedding_index(
     active, candidate = cloud_index_versions(resource)
     if candidate is None or candidate.version != version:
         raise IncompatibleModelRoute("Prepared embedding index is unavailable")
+    with control_session() as db:
+        row = db.get(WorkspaceConnector, (current_workspace(), _CONNECTOR))
+        config = row.config if row else None
+        corpora = config.get("corpora") if isinstance(config, dict) else None
+        item = corpora.get(key) if isinstance(corpora, dict) else None
+        build = item.get("build") if isinstance(item, dict) else None
+    if isinstance(build, dict) and (
+        build.get("status") != "ready" or build.get("version") != candidate.version
+    ):
+        raise IncompatibleModelRoute("Embedding rebuild is not ready; start a new one")
     provider_connection_route(
         candidate.provider,
         candidate.model,
@@ -295,8 +572,17 @@ def activate_cloud_embedding_index(
             or item.get("active") != (asdict(active) if active else None)
         ):
             raise IncompatibleModelRoute("Embedding candidate changed; rebuild again")
+        build = item.get("build")
+        if isinstance(build, dict) and (
+            build.get("status") != "ready" or build.get("version") != candidate.version
+        ):
+            raise IncompatibleModelRoute(
+                "Embedding rebuild is not ready; start a new one"
+            )
         item["active"] = asdict(candidate)
         item.pop("candidate", None)
+        if isinstance(build, dict) and build.get("version") == version:
+            item["build"] = {**build, "status": "activated", "updated_at": _now()}
         corpora[key] = item
         row.config = {**config, "corpora": corpora}
         db.commit()
@@ -317,6 +603,9 @@ def activate_cloud_embedding_index(
                 else:
                     item["active"] = asdict(active)
                 item["candidate"] = {"spec": asdict(candidate)}
+                build = item.get("build")
+                if isinstance(build, dict) and build.get("version") == version:
+                    item["build"] = {**build, "status": "ready", "updated_at": _now()}
                 corpora[key] = item
                 row.config = {**config, "corpora": corpora}
                 db.commit()
@@ -356,6 +645,33 @@ def cloud_embedding_status(*, corpus: str = "default") -> dict[str, object]:
             "default",
         )
     )
+    build: dict[str, object] | None = None
+    if resource:
+        with control_session() as db:
+            row = db.get(WorkspaceConnector, (current_workspace(), _CONNECTOR))
+            config = row.config if row else None
+            corpora = config.get("corpora") if isinstance(config, dict) else None
+            item = corpora.get(selected) if isinstance(corpora, dict) else None
+            stored_build = item.get("build") if isinstance(item, dict) else None
+        if isinstance(stored_build, dict):
+            build = {
+                field: stored_build.get(field)
+                for field in (
+                    "id",
+                    "status",
+                    "provider",
+                    "model",
+                    "completed_sources",
+                    "total_sources",
+                    "version",
+                    "indexed_chunks",
+                    "indexed_sources",
+                    "error",
+                )
+            }
+            if _stale_build(stored_build):
+                build["status"] = "stalled"
+                build["error"] = "The rebuild stopped. Please retry."
     return {
         "storage": "cloud_sql_pgvector",
         "client_embeddings_available": True,
@@ -372,4 +688,5 @@ def cloud_embedding_status(*, corpus: str = "default") -> dict[str, object]:
             "version": "legacy",
         },
         "candidate": asdict(candidate) if candidate else None,
+        "build": build,
     }

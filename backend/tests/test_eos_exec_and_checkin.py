@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from backend.auth import get_current_user
 from backend.main import app
 from rubik_core.auth.registry import UserRegistry
-from rubik_core.config import settings
+from rubik_core.config import AppMode, settings
 from rubik_core.database.schemas import UserProfile
 
 client = TestClient(app)
@@ -120,6 +120,42 @@ def test_create_user_with_is_exec_flag():
         )
     assert r.status_code == 200
     assert r.json()["is_exec"] is True
+
+
+def test_dev_preview_user_create_does_not_schedule_transcript_sync(monkeypatch):
+    _as_user("admin@example.com", roles=["admin"])
+    monkeypatch.setattr(settings, "APP_MODE", AppMode.DEV_MOCK_AUTH)
+
+    with patch("backend.routers.users.submit_background_work") as submit:
+        response = client.post(
+            "/api/users/",
+            json={"email": "preview-user@example.com", "name": "Preview User"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["email"] == "preview-user@example.com"
+    assert UserRegistry().get_user("preview-user@example.com") is not None
+    submit.assert_not_called()
+
+
+def test_local_user_create_keeps_historical_transcript_sync(monkeypatch):
+    _as_user("admin@example.com", roles=["admin"])
+    monkeypatch.setattr(settings, "APP_MODE", AppMode.LOCAL)
+
+    with patch("backend.routers.users.submit_background_work") as submit:
+        response = client.post(
+            "/api/users/",
+            json={"email": "local-user@example.com", "name": "Local User"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert submit.call_count == 1
+    assert submit.call_args.kwargs["args"] == [
+        "--users",
+        "local-user@example.com",
+        "--days",
+        "90",
+    ]
 
 
 # -- VTO Exec gating --------------------------------------------------------
