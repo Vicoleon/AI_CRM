@@ -58,6 +58,8 @@ def upgrade() -> None:
             )
     with op.batch_alter_table("cloud_vector_updates") as batch:
         batch.alter_column("sequence", existing_type=sa.BigInteger(), nullable=False)
+        # destructive-ok: replace source/generation uniqueness with ordered
+        # event uniqueness; existing rows are backfilled and retained above.
         batch.drop_constraint(
             "uq_cloud_vector_update_source_generation", type_="unique"
         )

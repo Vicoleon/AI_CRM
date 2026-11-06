@@ -32,6 +32,8 @@ def upgrade() -> None:
     if context.is_offline_mode():
         raise RuntimeError("Slack token encryption requires an online migration")
     _lock_timeout()
+    # destructive-ok: unverified legacy Slack tokens cannot be tied to the
+    # correct app and user, so each owner must reconnect through verified OAuth.
     op.execute(sa.text("DELETE FROM slack_credentials"))
     with op.batch_alter_table("slack_credentials") as batch:
         batch.drop_column("bot_token")

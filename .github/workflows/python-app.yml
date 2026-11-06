@@ -83,20 +83,44 @@ jobs:
     - name: Guard destructive DDL (SOC 2 H-13)
       if: github.event_name == 'pull_request'
       run: |
-        # New migrations that drop/truncate data must acknowledge intent with a
-        # `# destructive-ok: <reason>` comment, so destructive DDL is a
-        # deliberate, reviewable decision rather than a silent one.
+        # Check upgrade() only: downgrade() normally drops objects created by
+        # the migration and does not run during deployment. Destructive upgrade
+        # operations need a reason inside upgrade() for review.
         CHANGED=$(git diff --name-only --diff-filter=AM \
           "origin/${{ github.base_ref }}" HEAD -- 'alembic/versions/*.py' 'alembic_control/versions/*.py' || true)
         fail=0
         for f in $CHANGED; do
           [ -f "$f" ] || continue
-          if grep -qE 'drop_table|drop_column|drop_constraint|drop_index|op\.execute\(.*(DROP|TRUNCATE|DELETE)' "$f"; then
-            if ! grep -q 'destructive-ok:' "$f"; then
-              echo "::error file=$f::Destructive DDL without acknowledgment. If intended, add a comment '# destructive-ok: <reason>' in the migration."
-              fail=1
-            fi
-          fi
+          python - "$f" <<'PY' || fail=1
+        import ast
+        import re
+        import sys
+        from pathlib import Path
+
+        path = Path(sys.argv[1])
+        source = path.read_text()
+        module = ast.parse(source, filename=str(path))
+        upgrades = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "upgrade"]
+        if len(upgrades) != 1:
+            print(f"::error file={path}::Expected exactly one upgrade() function")
+            sys.exit(1)
+        upgrade = upgrades[0]
+        destructive = []
+        for node in ast.walk(upgrade):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            method = node.func.attr
+            if method in {"drop_table", "drop_column", "drop_constraint", "drop_index"}:
+                destructive.append(node)
+            elif method == "execute" and isinstance(node.func.value, ast.Name) and node.func.value.id == "op":
+                if re.search(r"\b(?:DROP|TRUNCATE|DELETE)\b", ast.unparse(node), re.IGNORECASE):
+                    destructive.append(node)
+        upgrade_lines = source.splitlines()[upgrade.lineno - 1 : upgrade.end_lineno]
+        acknowledged = re.search(r"(?m)^\s*#\s*destructive-ok:\s*\S", "\n".join(upgrade_lines))
+        if destructive and not acknowledged:
+            print(f"::error file={path},line={destructive[0].lineno}::Destructive upgrade requires a '# destructive-ok: <reason>' comment inside upgrade()")
+            sys.exit(1)
+        PY
         done
         exit $fail
     - name: Run Alembic Migrations

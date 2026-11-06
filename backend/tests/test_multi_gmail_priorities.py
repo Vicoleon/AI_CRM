@@ -383,6 +383,182 @@ def test_owner_dm_labels_personal_mail_while_manager_digest_excludes_it(monkeypa
     assert team == []
 
 
+def test_scheduled_run_persists_private_mail_and_delivers_only_to_owner(monkeypatch):
+    """The overnight path must carry mailbox provenance through the saved card."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from rubik_core.database import db as db_module
+    from rubik_core.database.models import Base, HomeCard
+    from rubik_core.priorities import batch
+    from rubik_core.priorities.agents.base import LLMJsonClient
+    from rubik_core.priorities.orchestrator import (
+        CHANNEL_AGENT_REGISTRY,
+        PrioritiesOrchestrator,
+    )
+
+    owner = "owner@team.test"
+    personal = "owner@gmail.test"
+    manager = "manager@team.test"
+    personal_id = f"{ACCOUNT_ID}:shared-thread"
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "get_engine", lambda: engine)
+    sessions = sessionmaker(bind=engine)
+
+    monkeypatch.setattr(
+        "rubik_core.tenancy.gmail_accounts.multi_gmail_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        "rubik_core.tenancy.gmail_accounts.list_accounts",
+        lambda email: (
+            [
+                {
+                    "id": ACCOUNT_ID,
+                    "email": personal,
+                    "status": "connected",
+                    "ai_provider_fingerprint": "a" * 64,
+                }
+            ]
+            if email == owner
+            else []
+        ),
+    )
+
+    class GmailClient:
+        def __init__(self, *, user_email, account_id=None):
+            assert user_email == owner
+            self.account_id = account_id
+
+        def search_threads(self, *, query, max_results):
+            if "in:inbox" not in query:
+                return []
+            return [_thread("shared-thread", personal if self.account_id else owner)]
+
+    monkeypatch.setattr("rubik_core.tools.gmail.GmailClient", GmailClient)
+
+    # Keep every other scheduled channel quiet. Gmail stays registered and
+    # runs through its normal fetch, parse, and prompt pipeline.
+    for kind in list(CHANNEL_AGENT_REGISTRY):
+        if kind == ChannelKind.GMAIL:
+            continue
+
+        def quiet_agent(channel):
+            class QuietAgent:
+                def __init__(self, **_kwargs):
+                    self.channel = channel
+
+                def run(self):
+                    return ChannelDigest(channel=channel, signals=[])
+
+            return QuietAgent
+
+        monkeypatch.setitem(CHANNEL_AGENT_REGISTRY, kind, quiet_agent(kind))
+    monkeypatch.setattr("rubik_core.control.repository.module_enabled", lambda _: False)
+    monkeypatch.setattr(
+        "rubik_core.priorities.settings_store.load_priorities_config",
+        PrioritiesConfig.default,
+    )
+    monkeypatch.setattr(
+        "rubik_core.promises.accountability.run_accountability_pass", lambda _: None
+    )
+    monkeypatch.setattr(
+        "rubik_core.availability.pto.detect_pto",
+        lambda *_args, **_kwargs: SimpleNamespace(on_pto_today=False, current=None),
+    )
+    monkeypatch.setattr(PrioritiesOrchestrator, "_build_handoff", lambda *a: None)
+
+    model_prompts = []
+
+    def model_reply(_self, prompt, **_kwargs):
+        model_prompts.append(prompt)
+        if "You are the Gmail channel extractor" in prompt:
+            return {"summary": "Two mailboxes have requests", "thread_attrs": {}}
+        if "You are the Summarizer agent" in prompt:
+            return {"narrative": "Two requests need review", "cross_channel_themes": []}
+        if "You are the Decision-Maker agent" in prompt:
+            return {
+                "priorities": [
+                    {
+                        "title": "Personal request",
+                        "entity_kind": "thread",
+                        "entity_id": "shared-thread",
+                        "signal_ids": [personal_id],
+                    },
+                    {
+                        "title": "Work request",
+                        "entity_kind": "thread",
+                        "entity_id": "shared-thread",
+                        "signal_ids": ["shared-thread"],
+                    },
+                ]
+            }
+        if "You are the Critic agent" in prompt:
+            return {"overall_score": 10}
+        raise AssertionError("Unexpected model request in scheduled run")
+
+    monkeypatch.setattr(LLMJsonClient, "invoke_json", model_reply)
+
+    class Bot:
+        is_available = True
+
+        def __init__(self):
+            self.sent = []
+
+        def send_dm(self, email, text=None, blocks=None):
+            self.sent.append((email, text, blocks))
+            return "ts-1"
+
+    bot = Bot()
+    monkeypatch.setattr(slack_delivery, "SlackBotClient", lambda: bot)
+    monkeypatch.setattr(
+        slack_delivery, "deactivated_priorities_emails", lambda *a, **k: set()
+    )
+    monkeypatch.setattr(slack_delivery, "_record_delivery", lambda *a: None)
+    monkeypatch.setattr(slack_delivery, "_alert_ops_delivery_failures", lambda *a: None)
+    monkeypatch.setattr(slack_delivery, "_enabled_departments", lambda db: {"sales"})
+    monkeypatch.setattr(slack_delivery, "_department_members", lambda db, dept: [owner])
+    monkeypatch.setattr(
+        slack_delivery, "_department_head_email", lambda db, dept: manager
+    )
+    monkeypatch.setattr(
+        "rubik_core.auth.registry.UserRegistry.get_user",
+        lambda self, email: {"email": email},
+    )
+
+    with use_workspace("test"):
+        result = batch.run_priorities_for_user(owner)
+        assert result.succeeded is True, result.error
+        with sessions() as db:
+            card = db.query(HomeCard).filter(HomeCard.user_email == owner).one()
+            assert card.metadata_json["private_gmail_context"] is True
+            by_title = {row["title"]: row for row in card.metadata_json["priorities"]}
+            assert by_title["Personal request"]["attrs"]["gmail_mailbox"] == personal
+            assert by_title["Personal request"]["attrs"]["personal_gmail"] is True
+            assert by_title["Work request"]["attrs"]["gmail_mailbox"] == owner
+            assert by_title["Work request"]["attrs"]["private_gmail_context"] is True
+
+            owner_delivery = slack_delivery.deliver_slack_priorities(db, emails=[owner])
+            assert slack_delivery._department_card_coverage(db, "sales") == (1, 1)
+            manager_delivery = slack_delivery.deliver_manager_digest(db)
+
+    assert owner_delivery.users_delivered == 1
+    assert [email for email, _, _ in bot.sent] == [owner]
+    assert "Personal request" in bot.sent[0][1]
+    assert f"*Mailbox:* {personal}" in str(bot.sent[0][2])
+    assert "Work request" in bot.sent[0][1]
+    assert manager_delivery.digests_sent == 0
+    assert manager_delivery.generation_missing is False
+    assert any(personal in prompt for prompt in model_prompts)
+
+
 def test_reauth_notice_keeps_work_signals_without_logging_mail_subject(monkeypatch):
     _connected_accounts(monkeypatch)
 
