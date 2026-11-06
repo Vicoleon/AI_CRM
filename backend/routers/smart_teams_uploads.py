@@ -66,7 +66,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.auth import require_smart_teams_access
-from backend.jobs.launcher import reject_support_background_work
+from backend.jobs.launcher import (
+    reject_support_background_work,
+    require_automations_http,
+)
 from rubik_core.auth.registry import UserProfile
 from rubik_core.database.db import get_db
 from rubik_core.smart_teams import uploads as up
@@ -153,7 +156,12 @@ def list_own_uploads(
 
 
 @router.post(
-    "/uploads", status_code=202, dependencies=[Depends(reject_support_background_work)]
+    "/uploads",
+    status_code=202,
+    dependencies=[
+        Depends(reject_support_background_work),
+        Depends(require_automations_http),
+    ],
 )
 def create_own_upload(
     background_tasks: BackgroundTasks,
@@ -170,6 +178,7 @@ def create_own_upload(
     The bytes are read in full here — they have to be, to bound the size and to
     store them — but nothing is *parsed* here. See the module docstring.
     """
+    require_automations_http()
     if not file.filename:
         raise HTTPException(status_code=400, detail="That file had no name.")
     data = file.file.read()

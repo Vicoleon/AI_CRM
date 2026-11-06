@@ -28,6 +28,7 @@ from pathlib import Path
 from rubik_core.adapters.chroma import ChromaAdapter
 from rubik_core.adapters.vertex_rag import VertexRagAdapter
 from rubik_core.auth.workspace import WorkspaceService
+from rubik_core.automation import automations_enabled, require_automations_enabled
 from rubik_core.config import AppMode, settings
 from rubik_core.dam.registry import AssetMetadata, DAMRegistry
 from rubik_core.database.db import SessionLocal
@@ -435,6 +436,7 @@ def _sync_user(
 
 def run_sync(user_emails: list[str] | None = None, days_ago: int = 1) -> dict:
     """Sync new transcripts for the given users (or every domain user)."""
+    require_automations_enabled()
     processor = _build_processor()
     dam_registry = DAMRegistry()
     participants_repo = SQLMeetingParticipantsRepository()
@@ -658,6 +660,11 @@ def backfill_participants(
 
 
 def main() -> None:
+    if not automations_enabled():
+        logger.info(
+            "Automatic processing is paused; transcript sync exits without work"
+        )
+        return
     from rubik_core.tenancy.cli import require_cli_workspace
 
     require_cli_workspace()

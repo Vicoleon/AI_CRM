@@ -25,7 +25,10 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from backend.auth import require_crm_sync
-from backend.jobs.launcher import reject_support_background_work
+from backend.jobs.launcher import (
+    reject_support_background_work,
+    require_automations_http,
+)
 from rubik_core.auth.registry import UserProfile
 from rubik_core.config import settings
 from rubik_core.crm_sync import apply as apply_mod
@@ -204,6 +207,7 @@ async def start_scan(
 ) -> dict:
     """Kick off a scan. 202 + run_id; poll ``/runs/{run_id}``."""
     reject_support_background_work()
+    require_automations_http()
     body = body or ScanRequest()
     email = user.email.lower()
 

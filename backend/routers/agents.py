@@ -33,7 +33,10 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from backend.auth import get_current_user, require_eos_module, security
-from backend.jobs.launcher import reject_support_background_work
+from backend.jobs.launcher import (
+    reject_support_background_work,
+    require_automations_http,
+)
 from rubik_core.auth.registry import UserProfile
 from rubik_core.brand import PRODUCT_NAME
 from rubik_core.config import settings
@@ -54,7 +57,10 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 scheduler_router = APIRouter(
     prefix="/agents",
     tags=["agents"],
-    dependencies=[Depends(reject_support_background_work)],
+    dependencies=[
+        Depends(reject_support_background_work),
+        Depends(require_automations_http),
+    ],
 )
 
 

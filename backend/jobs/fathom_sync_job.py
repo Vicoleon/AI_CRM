@@ -33,17 +33,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-
     # A Cloud Run execution has no request middleware. Select and validate its
     # workspace before importing code that can construct tenant DB or clients.
-    from rubik_core.tenancy.context import bootstrap_process_workspace
+    from backend.jobs.bootstrap import bootstrap_job_workspace
 
-    try:
-        bootstrap_process_workspace()
-    except (ValueError, RuntimeError) as exc:
-        logger.error("Fathom sync workspace unavailable: %s", exc)
+    if not bootstrap_job_workspace():
         return 2
+
+    args = _build_parser().parse_args(argv)
 
     # Deferred imports: pulls the app graph (DB, settings, Vertex).
     from backend.routers.fathom import process_fathom_transcripts_background

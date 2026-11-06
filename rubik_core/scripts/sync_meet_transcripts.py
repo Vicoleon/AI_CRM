@@ -7,6 +7,7 @@ from pathlib import Path
 from rubik_core.adapters.chroma import ChromaAdapter
 from rubik_core.adapters.vertex_rag import VertexRagAdapter
 from rubik_core.auth.workspace import WorkspaceService
+from rubik_core.automation import automations_enabled, require_automations_enabled
 from rubik_core.config import AppMode, settings
 from rubik_core.dam.registry import AssetMetadata, DAMRegistry
 from rubik_core.database.db import SessionLocal
@@ -38,6 +39,7 @@ def run_sync(user_emails: list[str] = None, days_ago: int = 7):
     Synchronizes Google Meet transcripts for the specified users (or all users if None).
     Capped to files modified within the last `days_ago` days.
     """
+    require_automations_enabled()
     processor = get_processor()
     db = SessionLocal()
     dam_registry = DAMRegistry()
@@ -274,6 +276,11 @@ def run_sync(user_emails: list[str] = None, days_ago: int = 7):
 
 
 if __name__ == "__main__":
+    if not automations_enabled():
+        logger.info(
+            "Automatic processing is paused; transcript sync exits without work"
+        )
+        raise SystemExit(0)
     import argparse
 
     from rubik_core.tenancy.cli import require_cli_workspace

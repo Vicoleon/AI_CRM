@@ -21,7 +21,7 @@ export const tours: readonly PageTour[] = [
             {
                 id: 'priorities',
                 title: 'AI Priorities',
-                body: 'Cubie ranks today’s work from your connected Gmail mailboxes, calendar, meetings, HubSpot, Slack and EOS. Email cards show the mailbox. Saved briefings respect current deal access. “Compiled” shows when the list was built; Refresh builds it again.',
+                body: 'Cubie ranks work from Gmail, calendar, meetings, HubSpot, Slack and EOS. Email cards show their mailbox. Saved briefings respect current deal access. “Compiled” dates the list; Refresh rebuilds it. A paused card cannot start a new run.',
                 target: 'home-priorities',
                 placement: 'bottom',
             },
@@ -70,6 +70,24 @@ export const tours: readonly PageTour[] = [
                 target: 'platform-support-banner',
                 placement: 'bottom',
                 requires: 'platform_support',
+            },
+        ],
+    },
+    {
+        id: 'home.new.automations-paused',
+        kind: 'new',
+        routes: ['/'],
+        title: 'Automatic processing can be paused',
+        helpTopic: 'daily-briefing',
+        requires: 'copilot',
+        since: '2026-11-06',
+        steps: [
+            {
+                id: 'paused-processing',
+                title: 'See when automatic processing is paused',
+                body: 'A paused workspace does not build new daily or weekly priorities or scheduled summaries. This card shows the pause and disables new runs. Productivity still lets you read your email and calendar.',
+                target: 'home-priorities',
+                placement: 'bottom',
             },
         ],
     },

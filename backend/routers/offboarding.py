@@ -26,6 +26,7 @@ from backend.audit import record_audit
 from backend.auth import admin_required, get_current_user
 from backend.jobs.launcher import (
     reject_support_background_work,
+    require_automations_http,
     submit_background_work,
 )
 from rubik_core.database.db import get_db
@@ -171,6 +172,8 @@ async def offboard_user(
     the sweep's email/calendar last pass only works while the account is
     impersonable.
     """
+    if body.run_sweep:
+        require_automations_http()
     try:
         record = store.create_record(
             db,
@@ -277,6 +280,7 @@ async def resweep(
 
     For the 'we offboarded before IT suspended, but the sweep raced the
     suspension' case, or a plain failure."""
+    require_automations_http()
     record = store.get_record(db, record_id)
     if record is None:
         raise HTTPException(status_code=404, detail="offboard record not found")

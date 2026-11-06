@@ -60,6 +60,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from rubik_core.automation import (
+    AutomationsPausedError,
+    automations_enabled,
+    require_automations_enabled,
+)
 from rubik_core.brand import PRODUCT_NAME
 from rubik_core.database.db import SessionLocal
 from rubik_core.database.models import MeetingPrepRun, Notification
@@ -532,6 +537,7 @@ def request_build(
     (nothing is written), and :class:`BuildNotStarted` when the row could not
     be written or the build could not be dispatched (the row is then marked
     failed, without a notification: the reader is looking at the error)."""
+    require_automations_enabled()
     if kind not in BUILD_KINDS:
         raise ValueError(f"Not a build kind: {kind!r}")
     try:
@@ -625,6 +631,7 @@ def dispatch(
     breaks the app loop's own calls while it holds the session. The thread
     pool is only for a caller with no loop at all (a script, a sync test):
     there nothing else drives the client, so the build's own loop is safe."""
+    require_automations_enabled()
     if runner_mode() == "job":
         try:
             from backend.routers.home import _launch_meeting_prep_job_execution
@@ -638,6 +645,8 @@ def dispatch(
                 product_to_emphasize=product_to_emphasize,
             )
             return "job"
+        except AutomationsPausedError:
+            raise
         except Exception:  # noqa: BLE001 — degrade to in-process, never fail the request
             logger.exception(
                 "meeting_prep build %s: Cloud Run Job launch failed — falling back "
@@ -799,6 +808,8 @@ async def run_build(
     crashed is built again (the Job retries once). Every way out of here
     leaves the row ready or failed — never running — and tells the reader,
     except ``unrecorded``/``missing``, where the Job exits non-zero."""
+    if not automations_enabled():
+        return "skipped"
     db = SessionLocal()
     try:
         return await _run_build(

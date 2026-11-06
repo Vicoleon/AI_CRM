@@ -158,6 +158,22 @@ def test_local_user_create_keeps_historical_transcript_sync(monkeypatch):
     ]
 
 
+def test_held_user_create_saves_without_historical_transcript_sync(monkeypatch):
+    _as_user("admin@example.com", roles=["admin"])
+    monkeypatch.setattr(settings, "APP_MODE", AppMode.LOCAL)
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", "false")
+
+    with patch("backend.routers.users.submit_background_work") as submit:
+        response = client.post(
+            "/api/users/",
+            json={"email": "held-user@example.com", "name": "Held User"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert UserRegistry().get_user("held-user@example.com") is not None
+    submit.assert_not_called()
+
+
 # -- VTO Exec gating --------------------------------------------------------
 
 

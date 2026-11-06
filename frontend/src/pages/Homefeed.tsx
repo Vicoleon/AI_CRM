@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { automationStatus } from '../auth/automation';
 import { RefreshCw, AlertCircle } from 'lucide-react';
 import { AIPrioritiesPanel } from '../components/AIPrioritiesPanel';
 import { TodayStrip, type BriefingSummary } from '../components/TodayStrip';
@@ -42,6 +43,10 @@ const PRIORITIES_HEADSTART_MS = 6_000;
 
 export const Homefeed: React.FC = () => {
     const { user } = useAuth();
+    const automationsEnabled = automationStatus(user) === 'enabled';
+    const warmAutomaticProductivity = useCallback(() => {
+        if (automationsEnabled) warmProductivity();
+    }, [automationsEnabled]);
     // The Today strip reads the same cached Email + Calendar and Slack copies
     // as Productivity, but leaves the fetching to warmProductivity: AI
     // Priorities loads first, then the warm-up gets Email, Calendar, Slack and
@@ -51,9 +56,10 @@ export const Homefeed: React.FC = () => {
     const { briefing, loading, refreshing, error, refresh } = useBriefing({ load: false });
     const { activity: slack } = useSlackActivity({ load: false });
     useEffect(() => {
-        const t = window.setTimeout(warmProductivity, PRIORITIES_HEADSTART_MS);
+        if (!automationsEnabled) return;
+        const t = window.setTimeout(warmAutomaticProductivity, PRIORITIES_HEADSTART_MS);
         return () => window.clearTimeout(t);
-    }, []);
+    }, [automationsEnabled, warmAutomaticProductivity]);
 
     const firstName = user?.name?.split(' ')[0] || 'there';
     const today = new Date().toLocaleDateString([], {
@@ -120,7 +126,7 @@ export const Homefeed: React.FC = () => {
             <div className="flex-1 overflow-y-auto">
                 {/* AI Priorities — multi-agent pipeline panel */}
                 <div className="px-8 mt-6">
-                    <AIPrioritiesPanel onSettled={warmProductivity} />
+                    <AIPrioritiesPanel onSettled={warmAutomaticProductivity} />
                 </div>
 
                 {/* Today strip — compact glance + tap to open /productivity */}

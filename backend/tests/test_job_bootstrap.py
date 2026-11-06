@@ -185,6 +185,17 @@ def test_hand_run_main_bootstraps_before_work(path):
         and node.name == "main"
     )
     statements = main.body[1:] if ast.get_docstring(main) else main.body
+    if path == "rubik_core/scripts/transcript_sync.py":
+        # The global operator hold may exit successfully before any tenant
+        # lookup. Once enabled, workspace binding must still be the first work.
+        hold = statements[0]
+        assert isinstance(hold, ast.If)
+        assert isinstance(hold.test, ast.UnaryOp)
+        assert isinstance(hold.test.op, ast.Not)
+        assert isinstance(hold.test.operand, ast.Call)
+        assert hold.test.operand.func.id == "automations_enabled"
+        assert isinstance(hold.body[-1], ast.Return)
+        statements = statements[1:]
     if path == "scripts/sync_cloudsql_to_sqlite.py":
         assert isinstance(statements[0], ast.Expr)
         assert statements[0].value.func.id == "_bootstrap_settings_for_cloud_sql"

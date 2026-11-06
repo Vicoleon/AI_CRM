@@ -123,7 +123,7 @@ def test_fathom_job_exits_nonzero_on_failed_poll_but_zero_on_skip(monkeypatch):
     from backend.routers import fathom
 
     monkeypatch.setattr(
-        "rubik_core.tenancy.context.bootstrap_process_workspace", lambda: None
+        "backend.jobs.bootstrap.bootstrap_process_workspace", lambda: None
     )
     monkeypatch.setattr("backend.routers.ingest.get_processor", lambda: object())
     monkeypatch.setattr(

@@ -24,6 +24,7 @@ from rubik_core.database.models import (
     AuditLog,
     Base,
     HomeCard,
+    OffboardRecord,
     User,
 )
 from rubik_core.offboarding import store
@@ -146,6 +147,34 @@ def test_offboard_deletes_roster_row_and_reassigns_assets(seeded):
     assert len(audit) == 1 and audit[0].doc_id == DEPARTED  # target lands in doc_id
     rec = store.get_record(seeded, rid)
     assert rec.sweep_status == "skipped"
+
+
+def test_held_sweep_refuses_before_offboard_writes(seeded, monkeypatch):
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", "false")
+    _as(ADMIN, is_admin=True)
+    response = client.post(
+        "/api/offboarding/offboard",
+        json={"email": DEPARTED, "successor_email": SUCCESSOR},
+    )
+    assert response.status_code == 503, response.text
+    seeded.expire_all()
+    assert seeded.get(User, DEPARTED) is not None
+    assert seeded.get(Asset, "doc-1").owner_email == DEPARTED
+    assert seeded.query(OffboardRecord).count() == 0
+    assert (
+        seeded.query(AuditLog).filter(AuditLog.action == "USER_OFFBOARD").count() == 0
+    )
+
+
+def test_held_resweep_keeps_existing_record_state(seeded, monkeypatch):
+    record_id = _offboard(seeded)
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", "false")
+    response = client.post(f"/api/offboarding/records/{record_id}/resweep")
+    assert response.status_code == 503, response.text
+    seeded.expire_all()
+    record = seeded.get(OffboardRecord, record_id)
+    assert record.sweep_status == "skipped"
+    assert record.status == "closed"
 
 
 def test_offboard_rejects_unknown_successor(seeded):

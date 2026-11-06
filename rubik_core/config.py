@@ -44,6 +44,10 @@ class Settings(BaseSettings):
 
     AUTO_MIGRATE: bool = True  # Default to True, but start.sh will handle mode check
 
+    # Platform-wide cost hold. Existing deployments keep their behavior until
+    # the operator explicitly disables automatic/background processing.
+    CUBIE_AUTOMATIONS_ENABLED: bool = True
+
     # EOS — alignment context auto-injected into every supervisor
     # turn. Set true to bypass for A/B comparison against the un-aligned
     # baseline.

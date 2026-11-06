@@ -106,7 +106,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.auth import require_smart_teams_access
-from backend.jobs.launcher import reject_support_background_work
+from backend.jobs.launcher import (
+    reject_support_background_work,
+    require_automations_http,
+)
 from rubik_core.auth.registry import UserProfile
 from rubik_core.database.db import get_db
 from rubik_core.database.models import User
@@ -508,6 +511,7 @@ def generate_pair_guide(
     staleness fix — the stale flag on the old row is what the UI shows a
     Regenerate button for.
     """
+    require_automations_http()
     reader, about = _resolve_pair(user, other_email)
 
     refusal = comparison.refuse_generation(db, [reader, about])

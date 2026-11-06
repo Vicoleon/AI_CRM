@@ -118,7 +118,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.auth import require_smart_teams_access
-from backend.jobs.launcher import reject_support_background_work
+from backend.jobs.launcher import (
+    reject_support_background_work,
+    require_automations_http,
+)
 from rubik_core.auth.registry import UserProfile
 from rubik_core.brand import PRODUCT_NAME
 from rubik_core.database.db import get_db
@@ -440,6 +443,7 @@ def generate_guide(
     ``guide.generate_into_row`` gives: the published wording is what they
     consented to. Unpublish first.
     """
+    require_automations_http()
     email = _fold(user.email)
     profile = _current_profile(db, email)
     if profile is None:
@@ -585,6 +589,7 @@ def approve_guide(
             detail="Only the person a guide is about can publish it.",
         )
 
+    require_automations_http()
     try:
         superseded = guide.approve(db, document, approver_email=email)
     except guide.GuideError as exc:
@@ -689,6 +694,8 @@ def unpublish_guide(
             "advisory_notice": ADVISORY_NOTICE,
         }
 
+    if document.rag_ingested:
+        require_automations_http()
     guide.unpublish(db, document)
     db.commit()
     db.refresh(document)

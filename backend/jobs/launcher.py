@@ -29,6 +29,12 @@ from copy import deepcopy
 
 from fastapi import BackgroundTasks, HTTPException
 
+from rubik_core.automation import (
+    AUTOMATIONS_PAUSED_MESSAGE,
+    AutomationsPausedError,
+    automations_enabled,
+    require_automations_enabled,
+)
 from rubik_core.config import AppMode, GcpProjectNotSet, gcp_project_id, settings
 from rubik_core.tenancy.context import (
     NoWorkspaceContext,
@@ -45,6 +51,12 @@ WORKER_JOB_NAME = "cubie-worker"
 
 class JobLaunchError(RuntimeError):
     """A Cloud Run Job execution could not be launched."""
+
+
+def require_automations_http() -> None:
+    """Refuse paused work before pending rows, dispatch or inline fallbacks."""
+    if not automations_enabled():
+        raise HTTPException(status_code=503, detail=AUTOMATIONS_PAUSED_MESSAGE)
 
 
 def _with_workspace_override(body: dict) -> dict:
@@ -108,6 +120,7 @@ def run_job_request(job_name: str, body: dict) -> dict:
     router layer aren't forced to depend on FastAPI's ``HTTPException``.
     """
     reject_support_background_work()
+    require_automations_enabled()
     body = _with_workspace_override(body)
 
     import google.auth
@@ -193,6 +206,7 @@ def launch_module_execution(
     Job deployed with its own env (the Deep Prep launcher does the same).
     """
     reject_support_background_work()
+    require_automations_enabled()
     container: dict = {"args": ["-m", module, *args]}
     if env:
         container["env"] = [
@@ -227,6 +241,9 @@ def submit_background_work(
     values.
     """
     reject_support_background_work()
+    # Deliberately outside the launch try/except: a policy hold must never
+    # degrade to the in-process fallback.
+    require_automations_http()
     try:
         slug = current_workspace()
     except NoWorkspaceContext as exc:
@@ -250,6 +267,8 @@ def submit_background_work(
                 execution_name,
             )
             return "job", execution_name
+        except AutomationsPausedError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception:  # noqa: BLE001 — degrade, never break the endpoint
             logger.exception(
                 "[jobs] %s: Cloud Run Job launch failed (job=%s) — falling "
@@ -261,6 +280,7 @@ def submit_background_work(
             )
 
     def scoped_fallback() -> None:
+        require_automations_enabled()
         with use_workspace(slug):
             fallback()
 

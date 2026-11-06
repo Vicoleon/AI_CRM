@@ -35,6 +35,7 @@ fi
 export PYTHONPATH="$ROOT"
 export APP_MODE=dev_mock_auth
 export ENABLE_MOCK_AUTH=true
+export CUBIE_AUTOMATIONS_ENABLED="${CUBIE_AUTOMATIONS_ENABLED:-false}"
 export CUBIE_DEV_USER_EMAIL="${CUBIE_DEV_USER_EMAIL:-dev@acme.example}"
 export FRONTEND_URL="http://127.0.0.1:${CUBIE_DEV_WEB_PORT:-5173}"
 export VITE_API_TARGET="http://127.0.0.1:${CUBIE_DEV_API_PORT:-8001}"

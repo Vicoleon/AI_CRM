@@ -50,6 +50,7 @@ def platform_env(monkeypatch):
         "CUBIE_PROVISION_SERVICE_MAX_INSTANCES": "1",
         "CUBIE_PROVISION_JOB_MAX_INSTANCES": "5",
         "CUBIE_PROVISION_RESERVED_CONNECTIONS": "10",
+        "CUBIE_AUTOMATIONS_ENABLED": "true",
     }.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("DEPLOY_FREEZE_OVERRIDE_REASON", raising=False)
@@ -620,7 +621,7 @@ def test_control_preflight_refuses_missing_instance_without_opening_sql(
         )
 
 
-@pytest.mark.parametrize("owner", ["control", "unrelated_role"])
+@pytest.mark.parametrize("owner", ["control", "unrelated_role", None])
 def test_control_database_retry_preserves_existing_role_credentials(
     platform_env, monkeypatch, owner
 ):
@@ -662,22 +663,23 @@ def test_control_database_retry_preserves_existing_role_credentials(
         lambda url, **kwargs: connections.append(url) or Engine(),
     )
     monkeypatch.setattr(deployment, "inspect", lambda connection: Inspector())
-    if owner != "control":
+    if owner not in ("control", None):
         with pytest.raises(deployment.DeployBlocked, match="different owner"):
             deployment._create_fresh_control_database()
         assert writes == []
         return
 
     deployment._create_fresh_control_database()
-    assert [url.username for url in connections] == [
-        "provisioner",
-        "control",
-        "control",
-    ]
-    assert writes == [
+    assert [url.username for url in connections] == (
+        ["provisioner", "control", "control"] if owner else ["provisioner", "control"]
+    )
+    expected = [
         'REVOKE CONNECT ON DATABASE "control" FROM PUBLIC',
         'GRANT CONNECT ON DATABASE "control" TO "control"',
     ]
+    if owner is None:
+        expected.insert(0, 'CREATE DATABASE "control" OWNER "control"')
+    assert writes == expected
 
 
 @pytest.mark.parametrize("create_fails", [False, True])
@@ -733,8 +735,18 @@ def test_new_control_role_configures_pg16_membership_only_while_creating_role(
     assert "set,inherit" in writes[setting].replace(" ", "").lower()
     assert setting < create < reset
     assert reset == create + 1
+    membership_grant = (
+        'GRANT "control" TO CURRENT_USER WITH ADMIN TRUE, INHERIT TRUE, SET TRUE'
+    )
     if create_fails:
         assert len(writes) == reset + 1
+        assert membership_grant not in writes
+    else:
+        grant = writes.index(membership_grant)
+        create_database = next(
+            i for i, sql in enumerate(writes) if sql.startswith("CREATE DATABASE ")
+        )
+        assert reset < grant < create_database
 
 
 def test_runtime_env_carries_capacity_settings(platform_env):
@@ -756,6 +768,129 @@ def test_runtime_env_carries_capacity_settings(platform_env):
         "CUBIE_PROVISION_RESERVED_CONNECTIONS",
     ):
         assert env[name] == os.environ[name]
+
+
+def test_runtime_env_preserves_automation_hold(platform_env, monkeypatch):
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", "false")
+    env = dict(
+        item.split("=", 1)
+        for item in deployment._runtime_env(
+            "test-project",
+            "us-central1",
+            "test-sql",
+            "a" * 40,
+            "client.apps.googleusercontent.com",
+            "test-bucket",
+        ).split(",")
+    )
+    assert env["CUBIE_AUTOMATIONS_ENABLED"] == "false"
+    for flag in (
+        "SCHEDULED_TASKS_ENABLED",
+        "MEETING_SKILLS_ENABLED",
+        "PROMISE_ACCOUNTABILITY_ENABLED",
+        "CCS_ENABLED",
+        "CCS_MEET_ENABLED",
+        "CCS_FATHOM_ENABLED",
+        "LOOP_CLOSURE_ENABLED",
+        "WHATS_NEW_ENABLED",
+    ):
+        assert env[flag] == "false"
+
+
+@pytest.mark.parametrize("flag", ["false", None])
+def test_held_deploy_skips_worker_jobs_and_scales_to_zero(
+    control, platform_env, monkeypatch, capsys, flag
+):
+    from types import SimpleNamespace
+
+    import requests
+
+    if flag is None:
+        monkeypatch.delenv("CUBIE_AUTOMATIONS_ENABLED")
+    else:
+        monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", flag)
+    monkeypatch.setenv("VITE_MEET_ADDON_CLOUD_PROJECT_NUMBER", "123")
+    monkeypatch.setenv("CUBIE_PUBLIC_ORIGIN", "https://app.example.com")
+    monkeypatch.setattr(deployment, "check_tree", lambda: "a" * 40)
+    monkeypatch.setattr(deployment, "_runtime_control_url", lambda *a: "control-url")
+    monkeypatch.setattr(deployment, "_runtime_admin_url", lambda *a: "admin-url")
+    monkeypatch.setattr(deployment, "_validate_release_secrets", lambda *a: None)
+    monkeypatch.setattr(
+        deployment,
+        "_secret_value",
+        lambda project, name: {
+            "CUBIE_CONTROL_DATABASE_URL": "control-url",
+            "CUBIE_PROVISION_ADMIN_DATABASE_URL": "admin-url",
+        }.get(name, "secret"),
+    )
+    schedule_calls = []
+    monkeypatch.setattr(
+        deployment,
+        "_schedules",
+        lambda *a, **k: schedule_calls.append(k) or 0,
+    )
+    calls = []
+
+    def cloud(*args, **kwargs):
+        calls.append(args)
+        if args[:3] == ("container", "images", "describe"):
+            return "sha256:" + "b" * 64
+        if args[:3] == ("run", "services", "describe"):
+            if "--format=json" in args:
+                return json.dumps(
+                    {
+                        "status": {
+                            "latestReadyRevisionName": "cubie-00001",
+                            "traffic": [{"latestRevision": True, "percent": 100}],
+                        }
+                    }
+                )
+            return "https://app.example.com"
+        return ""
+
+    monkeypatch.setattr(deployment, "_gcloud", cloud)
+    state = deployment.read_control()
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "git_sha": "a" * 12,
+                "control_schema_revision": state.revision,
+            },
+        ),
+    )
+    deployment.deploy(dry_run=False)
+    if flag is None:
+        assert "CUBIE_AUTOMATIONS_ENABLED" not in os.environ
+    job_deploys = [args for args in calls if args[:3] == ("run", "jobs", "deploy")]
+    assert [args[3] for args in job_deploys] == ["cubie-migrate"]
+    job_execs = [args for args in calls if args[:3] == ("run", "jobs", "execute")]
+    assert [args[3] for args in job_execs] == ["cubie-migrate"]
+    service = next(args for args in calls if args[:2] == ("run", "deploy"))
+    assert "--min-instances=0" in service
+    assert any("CUBIE_AUTOMATIONS_ENABLED=false" in arg for arg in service)
+    assert any(call.get("dry_run") is False for call in schedule_calls)
+    assert (
+        "schedule definitions held (new skipped; existing paused)"
+        in capsys.readouterr().out
+    )
+
+
+def test_held_deploy_dry_run_describes_skipped_activation(
+    control, platform_env, monkeypatch, capsys
+):
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", "false")
+    monkeypatch.setattr(deployment, "check_tree", lambda: "a" * 40)
+    monkeypatch.setattr(
+        deployment, "_gcloud", lambda *a, **k: pytest.fail("cloud write")
+    )
+    deployment.deploy(dry_run=True)
+    output = capsys.readouterr().out
+    assert "automation hold" in output
+    assert "migration Job only" in output
+    assert "skip worker Jobs and new schedules" in output
 
 
 def test_service_deploy_honors_declared_max_instances(

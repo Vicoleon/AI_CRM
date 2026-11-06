@@ -8,6 +8,7 @@ import { activeToken, clearAuthTokens, clearSupportToken, discardLegacySharedSup
 import { loadCurrentProfile } from './profileRequest';
 import { syncHomeTokenStorageEvent } from './sessionSync';
 import { completeSupportEntry } from './supportEntry';
+import { automationStatus } from '../auth/automation';
 
 // ─── Feature access: the SERVER decides, this file only reads ───────────────
 //
@@ -148,6 +149,7 @@ interface User {
     department?: string;
     roles: string[];
     last_ingest?: string;
+    automations_enabled?: boolean;
     is_exec?: boolean;
     // What this user may actually do, resolved server-side from their roles
     // (admins get everything). Keyed by resource: 'assets', 'documents',
@@ -342,6 +344,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         
         const currentUser = userOverride !== undefined ? userOverride : user;
         if (!token || !currentUser) return;
+        if (automationStatus(currentUser) !== 'enabled') return;
 
         // Transcript/Fathom ingestion feeds the copilot (Chat, briefing) — skip
         // it for EOS-only users; their /api/ingest calls would 403.

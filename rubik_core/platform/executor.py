@@ -68,6 +68,9 @@ class LocalExecutor:
     def delete_schedule(self, name: str) -> None:
         del name
 
+    def pause_schedule(self, name: str) -> None:
+        del name
+
     def checklist(self, spec: CreateSpec, client_id: str | None) -> tuple[str, ...]:
         del client_id
         return (
@@ -286,6 +289,11 @@ class CloudExecutor:
         name = row["name"]
         if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9-]+", name):
             raise ValueError("Invalid schedule name")
+        from rubik_core.automation import automations_enabled
+
+        if not automations_enabled():
+            self.pause_schedule(name)
+            return
         headers = dict(row.get("headers") or {})
         for key, value in list(headers.items()):
             if isinstance(value, dict) and value == {"secret": "SCHEDULER_API_KEY"}:
@@ -361,6 +369,25 @@ class CloudExecutor:
             raise RuntimeError(
                 f"Cloud Scheduler delete failed: HTTP {response.status_code}"
             )
+
+    def pause_schedule(self, name: str) -> None:
+        """Keep an existing job inactive without ever creating or resuming it."""
+        from urllib.parse import quote
+
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            raise ValueError("Invalid schedule name")
+        url = (
+            f"https://cloudscheduler.googleapis.com/v1/projects/"
+            f"{self.project}/locations/{self.region}/jobs/{quote(name)}"
+        )
+        session = self._authorized_session()
+        existing = session.get(url)
+        if existing.status_code == 404:
+            return
+        job = self._json_response(existing)
+        if job.get("state") in ("PAUSED", "DISABLED"):
+            return
+        self._json_response(session.post(f"{url}:pause", json={}))
 
     def checklist(self, spec: CreateSpec, client_id: str | None) -> tuple[str, ...]:
         from rubik_core.auth.workspace import GROUP_SCOPES as directory_group_scopes

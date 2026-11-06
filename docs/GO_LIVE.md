@@ -1,9 +1,9 @@
 # Cubie go-live handoff
 
-Phase 2 provides local code, tests and dry-run tooling. No Google Cloud project,
-client account, hostname or store listing has been created by this work. Keep
-the rollout local until the operator has reviewed a dry run and each human step
-below has an owner. This document is a checklist, not evidence of deployment.
+Phase 2 provides code, tests and dry-run tooling. Each cloud operation requires
+the reviewed target and authorization described below. Keep client rollout
+local until the operator has reviewed a dry run and each human step below has
+an owner. This document is a checklist, not evidence of deployment.
 
 ## 1. Choose the platform boundary
 
@@ -62,6 +62,32 @@ the approved bootstrap target and scope. Use
 `--phase all` path requires SQL/proxy prerequisites already prepared; use the
 two phases for a new instance. A normal deploy must never create or repair a
 missing/corrupt control schema.
+
+### Keep development automation off
+
+Set `CUBIE_AUTOMATIONS_ENABLED=false` in the private operator environment while
+developing. The deployed service uses zero minimum instances; non-migration
+worker Jobs are not deployed. Scheduler reconciliation skips new schedules and
+pauses existing manifest-owned schedules without deleting them or briefly
+creating an active trigger. Daily and weekly priorities, scheduled summaries,
+automatic transcript imports and other background work stay held. Job dispatch
+cannot bypass the hold through its in-process fallback. Existing worker
+entrypoints exit without running their workload. The home page shows the pause
+and does not start a priorities run on load.
+
+Migration maintenance remains available as an explicitly initiated operation.
+The hold concerns automatic processing; an explicit interactive model request
+may still incur inference cost. Re-enabling automation is an operator decision,
+not a side effect of onboarding a workspace or deploying another revision.
+An eventual enablement also requires an explicit review and resume of paused
+Scheduler jobs; setting the flag alone does not resume them.
+
+If the database is also being held for development cost, finish the reviewed
+control initialization and then stop the dedicated SQL instance with activation
+policy `NEVER`. It stays stopped until explicitly started again. This suspends
+instance compute charges, while storage and IP charges remain. A release
+preflight cannot read a stopped control database and must fail closed; start
+the database only for an authorized development or release session.
 
 ## 3. Prepare identity and client setup
 

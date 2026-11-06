@@ -12,6 +12,7 @@ import { DocumentsColumn } from '../components/briefing/DocumentsColumn';
 import { DepartmentFoldersColumn } from '../components/briefing/DepartmentFoldersColumn';
 import { SlackColumn } from '../components/briefing/SlackColumn';
 import { useAuth } from '../context/AuthContext';
+import { automationStatus } from '../auth/automation';
 
 
 type TabKey = 'email' | 'calendar' | 'slack' | 'documents' | 'team';
@@ -36,6 +37,7 @@ function _tabFromParam(value: string | null): TabKey | null {
 
 export const Productivity: React.FC = () => {
     const { user } = useAuth();
+    const automationsEnabled = automationStatus(user) === 'enabled';
     const [searchParams, setSearchParams] = useSearchParams();
     // Honor a `?tab=` deep link (e.g. the Homefeed "next meeting" badge links to
     // ?tab=calendar). Falls back to Email when absent/unknown.
@@ -55,7 +57,7 @@ export const Productivity: React.FC = () => {
     // Email, Calendar, Slack and Documents read the cached copies Home warmed
     // after AI Priorities loaded, so a tab paints at once. A copy over a minute
     // old is refreshed quietly behind it (the Refresh button spins meanwhile).
-    const { briefing, loading, refreshing, error, refresh } = useBriefing();
+    const { briefing, loading, refreshing, error, refresh } = useBriefing({ load: !!user });
     const [emailRefreshNonce, setEmailRefreshNonce] = useState(0);
     // On a narrow window the tab bar scrolls sideways; keep the selected tab
     // in view so a deep link to ?tab=team never lands on a hidden tab.
@@ -68,12 +70,12 @@ export const Productivity: React.FC = () => {
         loading: slackLoading,
         refreshing: slackRefreshing,
         refresh: refreshSlack,
-    } = useSlackActivity();
+    } = useSlackActivity({ load: !!user });
     // Landing here directly (a link, a reload) skips Home's warm-up; start the
     // tabs not on screen yet, Documents included, so switching is instant.
     useEffect(() => {
-        warmProductivity();
-    }, []);
+        if (automationsEnabled) warmProductivity();
+    }, [automationsEnabled]);
     const busy = refreshing || slackRefreshing;
 
     const handleRefresh = () => {

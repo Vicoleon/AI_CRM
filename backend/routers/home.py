@@ -20,11 +20,13 @@ from backend.auth import get_current_user
 from backend.jobs.launcher import (
     PRIORITIES_JOB_NAME,
     reject_support_background_work,
+    require_automations_http,
     submit_background_work,
 )
 from backend.services.gmail_service import classify_addressing, focus_sort_key
 from backend.services.user_context import build_user_context_block
 from rubik_core.auth.registry import UserProfile
+from rubik_core.automation import AutomationsPausedError, automations_enabled
 from rubik_core.brand import PRODUCT_NAME
 from rubik_core.cost.usage import attribute_to
 from rubik_core.database.db import SessionLocal, get_db
@@ -713,7 +715,8 @@ async def generate_briefing(
             # personal attention (drives the "May be important" badge). One
             # cheap Flash call, fail-open so the briefing never depends on it.
             first_name = (user.name or "").split()[0] if user.name else ""
-            await _flag_important_emails(emails, first_name)
+            if automations_enabled():
+                await _flag_important_emails(emails, first_name)
 
         # UC-39 — removed _extract_action_items LLM call; the UC-20→25
         # AI Priorities pipeline now owns "what to act on" with proper
@@ -2218,6 +2221,7 @@ async def _start_background_prep(
     from rubik_core.meeting_prep import background
 
     reject_support_background_work()
+    require_automations_http()
     if not (event_id or "").strip():
         raise HTTPException(status_code=400, detail="An event_id must be provided.")
     loop = asyncio.get_running_loop()
@@ -2238,6 +2242,8 @@ async def _start_background_prep(
 
     try:
         payload = await asyncio.to_thread(start)
+    except AutomationsPausedError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except background.TooManyBuilds as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except background.BuildNotStarted as exc:
@@ -3240,6 +3246,7 @@ async def queue_deep_meeting_prep(
     if not settings.CUBIE_DEEP_PREP_ENABLED:
         raise HTTPException(status_code=404, detail="Deep Prep is not enabled.")
 
+    require_automations_http()
     is_sales = is_sales_flavoured(user.department, user.roles)
     force_sales: bool | None = None
     if "admin" in [r.lower() for r in user.roles] and view in ("sales", "regular"):
@@ -4147,6 +4154,8 @@ async def generate_priorities(
         cached = await asyncio.to_thread(_load_today_priorities, user.email)
         if cached is not None:
             return PrioritiesResponse(**cached)
+
+    require_automations_http()
 
     # Miss or force_refresh → start a run (dedupe an already-pending run per
     # user — cross-instance, via the priorities_runs table).
@@ -5225,6 +5234,8 @@ async def get_more_priorities(
     items = await asyncio.to_thread(_fetch_other_recommendations, user.email, 5)
     if items:
         return MoreResponse(status="recommendations", items=items)
+
+    require_automations_http()
 
     def _start() -> dict | None:
         if run_state.active_run(user.email) is not None:

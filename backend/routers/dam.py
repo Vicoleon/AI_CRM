@@ -35,6 +35,7 @@ from pydantic import BaseModel
 from backend.auth import get_current_user
 from backend.jobs.launcher import (
     reject_support_background_work,
+    require_automations_http,
     submit_background_work,
 )
 from backend.routers.ingest import get_processor, require_upload_permission
@@ -43,6 +44,7 @@ from rubik_core.auth.permissions import (
     KNOWLEDGE_BASE_UPLOAD_DENIED,
     has_permission,
 )
+from rubik_core.automation import require_automations_enabled
 from rubik_core.config import AppMode, settings
 from rubik_core.cost.usage import attribute_to
 from rubik_core.dam.audit import log_action
@@ -278,6 +280,7 @@ def _run_ingest(
     doc_id, so a post-ingest purge would take the new chunks too) the old
     chunks are removed BEFORE the new ingest instead.
     """
+    require_automations_enabled()
     try:
         is_version = version_number is not None and version_number > 1
         if is_version:
@@ -525,6 +528,7 @@ def _launch_version_ingest(
     Returns the tempdir the CALLER must still clean up (None when the
     background task took ownership of it).
     """
+    require_automations_http()
     fallback = partial(
         _run_ingest,
         file_processor,
@@ -579,6 +583,7 @@ def _launch_version_ingest(
     "/upload",
     dependencies=[
         Depends(reject_support_background_work),
+        Depends(require_automations_http),
         Depends(require_upload_permission),
     ],
 )
@@ -616,6 +621,7 @@ async def upload_document(
     # This handler is also called directly by chat-file publication, which
     # bypasses its FastAPI route dependency. Refuse before bytes, GCS or rows.
     reject_support_background_work()
+    require_automations_http()
     if not has_permission(user, "assets", "create"):
         raise HTTPException(status_code=403, detail=KNOWLEDGE_BASE_UPLOAD_DENIED)
     if not file.filename:
@@ -950,7 +956,10 @@ async def download_version(
 @router.post(
     "/{doc_id:path}/versions",
     response_model=AssetVersionInfo,
-    dependencies=[Depends(reject_support_background_work)],
+    dependencies=[
+        Depends(reject_support_background_work),
+        Depends(require_automations_http),
+    ],
 )
 async def upload_version(
     doc_id: str,
@@ -967,6 +976,7 @@ async def upload_version(
     version stays downloadable and restorable, and Chat switches over once the
     new file is indexed. Identical bytes to the current version → 409.
     """
+    require_automations_http()
     doc_id = doc_id.lstrip("/")
     asset = dam_registry.get_asset(doc_id)
     if not asset:
@@ -1073,7 +1083,10 @@ async def upload_version(
 @router.post(
     "/{doc_id:path}/versions/{version_number}/restore",
     response_model=AssetVersionInfo,
-    dependencies=[Depends(reject_support_background_work)],
+    dependencies=[
+        Depends(reject_support_background_work),
+        Depends(require_automations_http),
+    ],
 )
 async def restore_version(
     doc_id: str,
@@ -1089,6 +1102,7 @@ async def restore_version(
     are the chosen version's (so the trail reads v1 → v2 → v3 = v1 restored),
     re-indexes it, and retires the version it replaces from the corpus.
     """
+    require_automations_http()
     doc_id = doc_id.lstrip("/")
     asset = dam_registry.get_asset(doc_id)
     if not asset:

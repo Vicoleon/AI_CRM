@@ -13,6 +13,12 @@ export const DailyBriefing: React.FC = () => (
             email, calendar, meeting transcripts, HubSpot, Slack and recently-updated Google
             Drive documents you&apos;ve labeled as important.
         </p>
+        <Callout tone="info">
+            If automatic processing is paused for your workspace, AI Priorities says so.
+            Daily and weekly priorities and scheduled summaries stay paused, and Refresh
+            and &ldquo;Get me other important things&rdquo; cannot start a new run.
+            You can still open Productivity to read your email and calendar.
+        </Callout>
         <p>
             Before showing a saved briefing, Cubie checks every HubSpot deal that was used to
             build it against your workspace&apos;s current access. If any deal loses access, the
@@ -20,7 +26,8 @@ export const DailyBriefing: React.FC = () => (
             hidden until a fresh one is built.
         </p>
         <p>
-            Your briefing is generated overnight so it&apos;s ready when you arrive. If the
+            When automatic processing is enabled, your briefing is generated overnight so
+            it&apos;s ready when you arrive. If the
             overnight run hits a snag for your account, Cubie retries automatically and, failing
             that, rebuilds the list the moment you open this page — a quiet day may show fewer
             items, but you&apos;ll never be handed an empty briefing while there was real work to

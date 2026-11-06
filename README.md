@@ -207,6 +207,8 @@ backend accepts mock authentication before signing in as `CUBIE_DEV_USER_EMAIL`
 (default `dev@acme.example`). The local setup provisions domains and admins.
 Mock sign-in skips automatic transcript sync. Local preview also blocks manual
 and scheduled transcript sweeps and skips historical sync when creating a user.
+The local setup defaults automatic processing off, so opening the preview does
+not start AI Priorities or background jobs.
 Features keyed to the company's domain use that workspace's
 verified primary domain. The AI Priorities batches, their
 Slack DM, the Loose Ends scan and the CRM Sync sweep never read a mailbox on a

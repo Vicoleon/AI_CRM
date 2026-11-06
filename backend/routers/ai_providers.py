@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.audit import record_audit
 from backend.auth import admin_required
+from backend.jobs.launcher import require_automations_http
 from rubik_core.ai_providers.cloud_sources import CloudSourceError
 from rubik_core.ai_providers.cloud_vector_index import CloudVectorIndexError
 from rubik_core.ai_providers.config import ROUTABLE_FEATURES, public_catalog
@@ -208,6 +209,7 @@ def prepare_embedding_index_route(
     payload: EmbeddingPrepareRequest,
     user: UserProfile = Depends(admin_required),
 ) -> dict:
+    require_automations_http()
     from rubik_core.ai_providers.embedding_index import prepare_embedding_index
 
     try:

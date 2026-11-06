@@ -43,8 +43,12 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from backend.auth import get_current_user, require_sales_or_admin
-from backend.jobs.launcher import reject_support_background_work
+from backend.jobs.launcher import (
+    reject_support_background_work,
+    require_automations_http,
+)
 from rubik_core.auth.registry import UserProfile
+from rubik_core.automation import AutomationsPausedError, automations_enabled
 from rubik_core.database.db import SessionLocal
 from rubik_core.database.models import XraySnapshot, XrayTimelineEvent
 from rubik_core.tenancy.threads import ContextThreadPoolExecutor
@@ -283,6 +287,7 @@ async def generate_deep(
 ) -> dict[str, Any]:
     """Kick off a Deep Research run. 202 + snapshot_id; poll /runs/{id}."""
     reject_support_background_work()
+    require_automations_http()
     await _require_owned_company(company_id)
     if not service.deep_runner_enabled():
         raise HTTPException(status_code=503, detail="Deep Research is disabled.")
@@ -323,6 +328,8 @@ async def generate_deep(
             )
             logger.info("xray deep %s dispatched to Cloud Run Job", snapshot_id)
             return {"snapshot_id": snapshot_id, "status": "pending"}
+        except AutomationsPausedError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception:  # noqa: BLE001 - degrade to in-process, never 500 the launch
             logger.exception(
                 "xray deep %s: Cloud Run Job launch failed — falling back to "
@@ -357,6 +364,8 @@ def _run_deep_safe(
     company_domain: str,
 ) -> None:
     """Thread-pool entry — never lets an exception escape the worker."""
+    if not automations_enabled():
+        return
     try:
         service.run_deep_job(
             snapshot_id,

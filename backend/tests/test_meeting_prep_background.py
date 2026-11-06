@@ -1216,6 +1216,7 @@ def test_job_entrypoint_requires_the_run(monkeypatch):
 def test_deep_prep_job_has_platform_only_secrets_and_workspace_routing(monkeypatch):
     from rubik_core.platform.deployment import _runtime_env, _runtime_secrets, load_jobs
 
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", "true")
     for name, value in {
         "CUBIE_PROVISION_DB_MAX_CONNECTIONS": "200",
         "CUBIE_PROVISION_SERVICE_MAX_INSTANCES": "1",

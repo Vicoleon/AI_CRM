@@ -54,6 +54,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.auth import require_smart_teams_access
+from backend.jobs.launcher import require_automations_http
 from rubik_core.auth.registry import UserProfile
 from rubik_core.database.db import get_db
 from rubik_core.database.smart_teams import (
@@ -1498,6 +1499,8 @@ def complete_interview(
         state = _completion_state(db, email)
         state["enqueued"] = False
         return state
+
+    require_automations_http()
 
     try:
         completed = list(iv.normalize_completed(row.sections_completed))

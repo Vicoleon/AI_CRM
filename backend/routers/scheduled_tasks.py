@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.auth import get_current_user
+from backend.jobs.launcher import require_automations_http
 from rubik_core.auth.registry import UserProfile
 from rubik_core.config import settings
 from rubik_core.database.db import get_db
@@ -291,6 +292,7 @@ async def run_scheduled_task_now(
     409 when a run is already in flight: a second concurrent run would spend
     the tokens twice and deliver the same answer twice.
     """
+    require_automations_http()
     task = _load(db, task_id, user)
     try:
         outcome = dispatch.dispatch_task_now(db, task)

@@ -163,6 +163,13 @@ def _platform_admin(args: argparse.Namespace) -> object:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from rubik_core.platform.automation import operator_automation_policy
+
+    with operator_automation_policy():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         _authorize_operator(args)

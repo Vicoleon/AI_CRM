@@ -29,11 +29,13 @@ from backend.jobs.launcher import (
     JobLaunchError,
     launch_module_execution,
     reject_support_background_work,
+    require_automations_http,
     run_job_request,
 )
 from rubik_core.ai_providers.adk_model import resolve_adk_route
 from rubik_core.ai_providers.registry import IncompatibleModelRoute
 from rubik_core.ai_providers.runtime import ProviderRequestError
+from rubik_core.automation import require_automations_enabled
 from rubik_core.config import settings
 from rubik_core.cost.usage import attribute_to
 from rubik_core.database.db import get_db
@@ -59,6 +61,7 @@ async def _run_nightly_pipeline(target_email: str):
     This is designed to be idempotent: running it twice for the same date
     will update existing HomeCards rather than creating duplicates.
     """
+    require_automations_enabled()
     set_admin_context(True)
     from rubik_core.agent_runtime.nightly_pipeline import build_nightly_pipeline
 
@@ -170,7 +173,7 @@ def _run_pipeline_sync(target_email: str):
         loop.close()
 
 
-@router.post("/overnight-briefing")
+@router.post("/overnight-briefing", dependencies=[Depends(require_automations_http)])
 async def trigger_briefing(
     request: Request,
     payload: BriefingRequest,
@@ -579,7 +582,11 @@ class PrioritiesRunAllRequest(BaseModel):
     target_email: str | None = None
 
 
-@router.post("/priorities/run-all", response_model=PrioritiesRunAllStartedResponse)
+@router.post(
+    "/priorities/run-all",
+    response_model=PrioritiesRunAllStartedResponse,
+    dependencies=[Depends(require_automations_http)],
+)
 async def run_priorities_for_all_users(
     request: Request,
     body: PrioritiesRunAllRequest | None = None,
@@ -651,7 +658,9 @@ async def run_priorities_for_all_users(
 
 
 @router.post(
-    "/priorities/run-next-week", response_model=PrioritiesRunAllStartedResponse
+    "/priorities/run-next-week",
+    response_model=PrioritiesRunAllStartedResponse,
+    dependencies=[Depends(require_automations_http)],
 )
 async def run_next_week_priorities(
     request: Request,
@@ -732,7 +741,7 @@ async def run_next_week_priorities(
 # Scheduler calls it with only an X-Scheduler-Key, no user token.
 
 
-@router.post("/ingestion-council/run")
+@router.post("/ingestion-council/run", dependencies=[Depends(require_automations_http)])
 async def run_ingestion_council(
     request: Request,
     scope: str = Query("nightly", pattern="^(nightly|weekly|all|priorities-gate)$"),

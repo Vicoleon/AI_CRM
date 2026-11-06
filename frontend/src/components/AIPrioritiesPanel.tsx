@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import client from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { automationStatus } from '../auth/automation';
 import { DeferDealModal } from './sales/DeferDealModal';
 import type { DeferTarget } from '../api/dealDefer';
 import { FeedbackButtons } from './FeedbackButtons';
@@ -373,7 +374,10 @@ export const AIPrioritiesPanel: React.FC<{
     const [successFlash, setSuccessFlash] = useState<string | null>(null);
     // My To-Dos gate — the "Add to my To-Dos" action is hidden for anyone the
     // server says is not on the `todos` roster (the endpoint re-checks).
-    const { canAccessTodos, hasFeature } = useAuth();
+    const { user, canAccessTodos, hasFeature } = useAuth();
+    const automationState = automationStatus(user);
+    const automationsEnabled = automationState === 'enabled';
+    const profileEmail = user?.email ?? '';
     // Defer a deal: set the deal aside until a follow-up date, with a note and
     // a HubSpot task (`deal_defer` roster; the endpoint re-checks). Wider than
     // snoozing this one card — every card about the deal, and the deal's rows
@@ -447,6 +451,13 @@ export const AIPrioritiesPanel: React.FC<{
     }, [stopPolling]);
 
     const fetchPriorities = useCallback(async (force = false) => {
+        if (!profileEmail || automationState !== 'enabled') {
+            stopPolling();
+            setIndexing(false);
+            setLoading(automationState === 'loading');
+            if (automationState === 'paused') onSettledRef.current?.();
+            return;
+        }
         setLoading(true);
         setError(null);
         setStaleNotice(null);
@@ -473,7 +484,7 @@ export const AIPrioritiesPanel: React.FC<{
             setLoading(false);
             onSettledRef.current?.();
         }
-    }, [startRunPolling]);
+    }, [automationState, profileEmail, startRunPolling, stopPolling]);
 
     useEffect(() => { fetchPriorities(false); }, [fetchPriorities]);
 
@@ -718,6 +729,7 @@ export const AIPrioritiesPanel: React.FC<{
     }, [stopPolling]);
 
     const requestMore = useCallback(async () => {
+        if (!automationsEnabled) return;
         setMoreLoading(true);
         setError(null);
         setNoNewItems(false);
@@ -737,7 +749,7 @@ export const AIPrioritiesPanel: React.FC<{
         } finally {
             setMoreLoading(false);
         }
-    }, [bundle?.generated_at, startPollingForNewCard]);
+    }, [automationsEnabled, bundle?.generated_at, startPollingForNewCard]);
 
     const actionCtx: ActionContext = {
         navigate, triggerFocusBlock, setError, refresh: fetchPriorities,
@@ -786,15 +798,22 @@ export const AIPrioritiesPanel: React.FC<{
                     )}
                     <button
                         onClick={() => fetchPriorities(true)}
-                        disabled={loading || indexing}
+                        disabled={!automationsEnabled || loading || indexing}
                         className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-amber-700 disabled:opacity-50"
-                        title="Re-run the pipeline"
+                        title={automationsEnabled ? 'Re-run the pipeline' : 'Automatic processing is paused'}
                     >
                         <RefreshCw className={`h-3.5 w-3.5 ${loading || indexing ? 'animate-spin' : ''}`} />
                         {indexing ? 'Indexing…' : 'Refresh'}
                     </button>
                 </div>
             </div>
+
+            {automationState === 'paused' && (
+                <p role="status" className="mb-3 rounded-lg bg-gray-50 p-3 text-sm text-gray-600">
+                    Automatic processing is paused for this workspace. Daily and weekly
+                    priorities and scheduled summaries will stay paused until it is enabled.
+                </p>
+            )}
 
             {pto && (
                 <div className="p-3 mb-3 bg-emerald-50 border border-emerald-100 text-emerald-800 rounded-lg text-sm flex items-start gap-2">
@@ -871,7 +890,7 @@ export const AIPrioritiesPanel: React.FC<{
                 </div>
             )}
 
-            {indexing && !bundle ? (
+            {automationState === 'paused' && !bundle ? null : indexing && !bundle ? (
                 <div className="py-8 text-center flex flex-col items-center gap-2">
                     <RefreshCw className="h-5 w-5 animate-spin text-amber-500" />
                     <p className="text-sm font-medium text-gray-700">Indexing your priorities…</p>
@@ -911,7 +930,7 @@ export const AIPrioritiesPanel: React.FC<{
                             )}
                             <button
                                 onClick={requestMore}
-                                disabled={moreLoading}
+                                disabled={!automationsEnabled || moreLoading}
                                 className="mt-4 inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 px-3 py-1.5 rounded-lg disabled:opacity-50"
                             >
                                 {moreLoading

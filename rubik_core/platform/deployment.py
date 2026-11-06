@@ -531,6 +531,9 @@ def _runtime_env(
     bucket: str,
     public_origin: str = "",
 ) -> str:
+    from rubik_core.platform.automation import operator_automations_enabled
+
+    enabled = operator_automations_enabled()
     values = {
         "APP_MODE": "gcp",
         "GIT_SHA": sha[:12],
@@ -552,7 +555,20 @@ def _runtime_env(
         "LOOP_CLOSURE_ENABLED": "true",
         "WHATS_NEW_ENABLED": "true",
         "CHROME_EXTENSION_ENABLED": "true",
+        "CUBIE_AUTOMATIONS_ENABLED": str(enabled).lower(),
     }
+    if not enabled:
+        for name in (
+            "SCHEDULED_TASKS_ENABLED",
+            "MEETING_SKILLS_ENABLED",
+            "PROMISE_ACCOUNTABILITY_ENABLED",
+            "CCS_ENABLED",
+            "CCS_MEET_ENABLED",
+            "CCS_FATHOM_ENABLED",
+            "LOOP_CLOSURE_ENABLED",
+            "WHATS_NEW_ENABLED",
+        ):
+            values[name] = "false"
     if public_origin:
         values["FRONTEND_URL"] = public_origin
         values["CUBIE_PROVISION_SERVICE_URL"] = public_origin
@@ -627,6 +643,10 @@ def _job_args(
 
 
 def _schedules(state: ControlState, *, dry_run: bool, service_url: str = "") -> int:
+    from rubik_core.platform.automation import (
+        operator_automation_policy,
+        operator_automations_enabled,
+    )
     from rubik_core.platform.schedules import load_manifest, reconcile_schedules
 
     active = [row for row in state.workspaces if row.status == "active"]
@@ -641,10 +661,12 @@ def _schedules(state: ControlState, *, dry_run: bool, service_url: str = "") -> 
     )
     previous = os.environ.get("SCHEDULER_API_KEY")
     try:
-        os.environ["SCHEDULER_API_KEY"] = _secret_value(
-            _required("GCP_PROJECT_ID"), "SCHEDULER_API_KEY"
-        )
-        return len(reconcile_schedules(load_manifest(), active, CloudExecutor()))
+        if operator_automations_enabled():
+            os.environ["SCHEDULER_API_KEY"] = _secret_value(
+                _required("GCP_PROJECT_ID"), "SCHEDULER_API_KEY"
+            )
+        with operator_automation_policy():
+            return len(reconcile_schedules(load_manifest(), active, CloudExecutor()))
     finally:
         if previous is None:
             os.environ.pop("SCHEDULER_API_KEY", None)
@@ -653,6 +675,15 @@ def _schedules(state: ControlState, *, dry_run: bool, service_url: str = "") -> 
 
 
 def deploy(*, dry_run: bool) -> None:
+    from rubik_core.platform.automation import operator_automation_policy
+
+    with operator_automation_policy():
+        _deploy(dry_run=dry_run)
+
+
+def _deploy(*, dry_run: bool) -> None:
+    from rubik_core.platform.automation import operator_automations_enabled
+
     project = _required("GCP_PROJECT_ID")
     region = _required("GCP_REGION")
     instance = _required("CLOUDSQL_INSTANCE")
@@ -666,6 +697,12 @@ def deploy(*, dry_run: bool) -> None:
     check_freezes(state)
     sha = check_tree()
     jobs = load_jobs()
+    automation_enabled = operator_automations_enabled()
+    deployed_jobs = (
+        jobs
+        if automation_enabled
+        else [job for job in jobs if job["name"] == "cubie-migrate"]
+    )
     capacity = _capacity_settings()
     gmail = _gmail_oauth_config()
     if not dry_run:
@@ -711,14 +748,21 @@ def deploy(*, dry_run: bool) -> None:
 
         count = len(load_manifest()["schedules"])
         schedule_label = "schedule definitions (expanded after migration)"
+    if not automation_enabled:
+        schedule_label = "schedule definitions held (new skipped; existing paused)"
     image_tag = f"gcr.io/{project}/cubie:{sha[:12]}"
     print(
-        f"Preflight passed: {len(state.workspaces)} registered workspaces; {count} {schedule_label}; {len(jobs)} Jobs; commit {sha[:12]}"
+        f"Preflight passed: {len(state.workspaces)} registered workspaces; {count} {schedule_label}; {len(deployed_jobs)} Jobs; commit {sha[:12]}"
     )
     if dry_run:
-        print(
-            "DRY RUN: build one image, migrate all registered databases, deploy service and Jobs, reconcile schedules, check /health"
-        )
+        if automation_enabled:
+            print(
+                "DRY RUN: build one image, migrate all registered databases, deploy service and Jobs, reconcile schedules, check /health"
+            )
+        else:
+            print(
+                "DRY RUN: automation hold; build one image, migrate registered databases, deploy service with zero minimum instances and the migration Job only; skip worker Jobs and new schedules, pause existing managed schedules, check /health"
+            )
         return
     _gcloud(
         "builds",
@@ -777,7 +821,7 @@ def deploy(*, dry_run: bool) -> None:
         f"--set-cloudsql-instances={project}:{region}:{instance}",
         "--memory=2Gi",
         "--cpu=2",
-        "--min-instances=1",
+        f"--min-instances={1 if automation_enabled else 0}",
         f"--max-instances={capacity['CUBIE_PROVISION_SERVICE_MAX_INSTANCES']}",
         "--concurrency=8",
         "--timeout=300",
@@ -826,7 +870,7 @@ def deploy(*, dry_run: bool) -> None:
     )
     if not service_url.startswith("https://"):
         raise DeployBlocked("Service URL is invalid")
-    for job in jobs:
+    for job in deployed_jobs:
         if job["name"] == "cubie-migrate":
             continue
         check_freezes(read_control())
@@ -852,7 +896,7 @@ def deploy(*, dry_run: bool) -> None:
     ):
         raise DeployBlocked("Serving revision or control schema does not match release")
     print(
-        f"Deployed {sha[:12]} to {service_url} with one image digest and {len(jobs)} Jobs"
+        f"Deployed {sha[:12]} to {service_url} with one image digest and {len(deployed_jobs)} Jobs"
     )
 
 
@@ -944,6 +988,12 @@ def _create_fresh_control_database() -> None:
                         connection.exec_driver_sql(f'CREATE ROLE "{user}" LOGIN')
                     finally:
                         connection.exec_driver_sql("RESET createrole_self_grant")
+                    # Managed PostgreSQL can bypass the self-grant above. Make
+                    # this new role's intended owner privileges explicit.
+                    connection.exec_driver_sql(
+                        f'GRANT "{user}" TO CURRENT_USER '
+                        "WITH ADMIN TRUE, INHERIT TRUE, SET TRUE"
+                    )
                     quoted_password = connection.scalar(
                         text("SELECT quote_literal(:password)"), {"password": password}
                     )

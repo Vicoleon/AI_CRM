@@ -23,6 +23,7 @@ from backend.jobs.launcher import (
 from backend.models.role import ResourcePermissions, Role
 from rubik_core.auth.permissions import visible_permissions
 from rubik_core.auth.registry import UserProfile
+from rubik_core.automation import automations_enabled
 from rubik_core.config import AppMode, settings
 from rubik_core.control.repository import is_platform_admin
 from rubik_core.database.db import get_db
@@ -115,6 +116,8 @@ class MeResponse(UserProfile):
     permissions: dict[str, ResourcePermissions] = {}
     features: dict[str, bool] = {}
     modules: dict[str, bool] = {}
+    #: Platform automation pause, independent of feature access rosters.
+    automations_enabled: bool = True
     #: May read ANOTHER person's raw Smart Teams answers and scores for support
     #: (``rubik_core.smart_teams.authz.is_support_admin``). A per-subject
     #: privacy rule that stays in code, not a feature roster; shipped so the
@@ -225,6 +228,7 @@ async def get_me(
         permissions=visible_permissions(user),
         features=features,
         modules=modules,
+        automations_enabled=automations_enabled(),
         smart_teams_support=smart_support,
         impersonation=impersonation,
         support=(
@@ -297,7 +301,7 @@ async def create_user(
 
     # A mock-admin preview can create local demo users but must never touch
     # real Workspace transcripts through a historical sync.
-    if settings.APP_MODE != AppMode.DEV_MOCK_AUTH:
+    if settings.APP_MODE != AppMode.DEV_MOCK_AUTH and automations_enabled():
         # Run the 90-day import on cubie-worker; it outlives a web request.
         submit_background_work(
             background_tasks,

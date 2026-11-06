@@ -183,3 +183,14 @@ def test_users_me_carries_the_workspace_company_name(db):
         "name": "Test Workspace",
         "company_name": "Acme Corp",
     }
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_users_me_exposes_the_operator_automation_policy(db, monkeypatch, enabled):
+    _as("rep@acme.example", ["user"])
+    monkeypatch.setenv("CUBIE_AUTOMATIONS_ENABLED", str(enabled).lower())
+
+    response = client.get("/api/users/me")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["automations_enabled"] is enabled
