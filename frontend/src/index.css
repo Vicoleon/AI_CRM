@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Cubie's brand, as RGB channels so Tailwind can add an alpha
+   (`bg-brand/10` is `rgb(var(--brand) / 0.1)`). tailwind.config.js maps the
+   tokens onto these; code that cannot use a class (chart canvases) reads them
+   through `src/brand/colors.ts`. A workspace's own accent later overrides
+   `--brand` and its shades here, after sign-in. Mirrors rubik_core/brand.py.
+   The fonts are self-hosted (@fontsource-variable, imported by each entry). */
+@layer base {
+  :root {
+    --brand: 124 58 237;          /* violet #7C3AED: primary actions, active states */
+    --brand-hover: 109 40 217;    /* #6D28D9 */
+    --brand-tint: 242 240 247;    /* off-white #F2F0F7: tinted surfaces */
+    --brand-soft: 213 202 252;    /* lavender #D5CAFC: soft surfaces, borders */
+    --accent: 164 123 255;        /* lavender #A47BFF: the secondary accent */
+    --rail: 14 7 41;              /* ink #0E0729: the navigation rail */
+    --rail-active: 124 58 237;    /* violet: the rail's active item */
+    --ink: 14 7 41;               /* ink #0E0729: headings on light surfaces */
+    --success-brand: 3 85 62;     /* green #03553E: positive signals only */
+    --font-display: 'Unbounded Variable', 'Unbounded', ui-sans-serif, system-ui, sans-serif;
+    --font-body: 'Montserrat Variable', 'Montserrat', ui-sans-serif, system-ui, sans-serif;
+  }
+
+  body {
+    @apply font-sans antialiased text-slate-900 bg-slate-50;
+  }
+}
+
+@keyframes slide-in-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* `scrollbar-hide` is used by the left nav rail, the Chat thread list and the
+   Productivity tabs but was never defined — so a native scrollbar was eating real
+   width. It matters most on the 68px area rail, where ~15px of gutter is 22% of
+   the column. Overflow still scrolls; only the bar is hidden. */
+.scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}

@@ -1,0 +1,30 @@
+.git
+.gitignore
+.env
+.env.*
+.claude
+.venv
+__pycache__
+frontend/node_modules
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+*.db
+*.sqlite3
+*.log
+*.xlsx
+.~lock.*
+dam_data
+data
+workspace-secrets.bin*
+cubie-local-fernet.key
+.superpowers
+venv
+
+# Local-only build/data dirs. Excluded because they are pure upload weight:
+# neither is COPYed by the Dockerfile, which rebuilds the frontend in its own
+# stage and runs APP_MODE=gcp (Vertex RAG), never the Chroma store in storage/.
+# Keep these lines exact — the deploy preflight matches them with `grep -qxF`.
+storage
+frontend/dist

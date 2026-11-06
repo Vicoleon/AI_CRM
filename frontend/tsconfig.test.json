@@ -1,0 +1,36 @@
+{
+  // Type-checks the `node --test` files, and the src/testing helpers they
+  // share, ONLY.
+  //
+  // Separate from tsconfig.app.json on purpose: those tests import `node:test`
+  // and `node:assert`, which need @types/node, and pulling Node's globals into
+  // the app's type space would quietly change what `setTimeout` and friends
+  // resolve to for every component. Keeping them apart means a test can use the
+  // Node runtime without the app inheriting it, while `tsc -b` still covers
+  // both.
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "target": "ES2022",
+    // DOM as well as Node: the modules under test sit next to the app's axios
+    // client, which reads browser globals.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "types": ["node", "vite/client"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/testing"]
+}

@@ -1,0 +1,14 @@
+# One image build for the Service and every Cloud Run Job.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}
+      - --build-arg
+      - VITE_GOOGLE_CLIENT_ID=${_VITE_GOOGLE_CLIENT_ID}
+      - --build-arg
+      - VITE_MEET_ADDON_CLOUD_PROJECT_NUMBER=${_VITE_MEET_ADDON_CLOUD_PROJECT_NUMBER}
+      - .
+images:
+  - ${_IMAGE}

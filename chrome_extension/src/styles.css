@@ -1,0 +1,395 @@
+/* Calm on purpose: one accent (Cubie violet), small type, no motion beyond a
+   fade, nothing that blinks. Light and dark follow the system. */
+
+:root {
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --text: #1f1e1c;
+  --text-2: #5f5e5a;
+  --text-3: #8a8983;
+  --line: rgba(31, 30, 28, 0.1);
+  --line-strong: rgba(31, 30, 28, 0.22);
+  --accent: #7C3AED;
+  --accent-soft: rgba(124, 58, 237, 0.08);
+  --late: #a32d2d;
+  --high: #e24b4a;
+  --medium: #ba7517;
+  --low: #b4b2a9;
+  --radius: 8px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1b1a;
+    --surface: #252422;
+    --text: #ecebe7;
+    --text-2: #b4b2a9;
+    --text-3: #888780;
+    --line: rgba(236, 235, 231, 0.12);
+    --line-strong: rgba(236, 235, 231, 0.26);
+    --accent: #A47BFF;
+    --accent-soft: rgba(164, 123, 255, 0.14);
+    --late: #f09595;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* `hidden` must win over the display rules below (labels are flex). */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* ── New tab ─────────────────────────────────────────────────────────────── */
+
+.wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 14vh 16px 48px;
+}
+
+.greeting {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 28px;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  outline: none;
+}
+
+.search input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.search-ask {
+  height: 44px;
+  border-radius: 22px;
+  padding: 0 16px;
+}
+
+/* ── The Cubie block (new tab and popup) ─────────────────────────────────── */
+
+.headline {
+  margin: 0 0 20px;
+  font-family: Georgia, 'Iowan Old Style', serif;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.block {
+  margin-bottom: 18px;
+}
+
+.block-label {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+  transition: opacity 0.2s;
+}
+
+.row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px 9px 0;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 4px;
+}
+
+.row-main:hover .row-title,
+.row-main:focus-visible .row-title {
+  color: var(--accent);
+}
+
+.row-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-meta {
+  color: var(--text-2);
+}
+
+.row-why {
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-when {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.row-when.is-late {
+  color: var(--late);
+}
+
+.row.is-pending {
+  opacity: 0.55;
+}
+
+.row.is-pending .row-title {
+  text-decoration: line-through;
+}
+
+.check,
+.check-spacer {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.check {
+  padding: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.check:hover,
+.check:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.check.is-done {
+  width: auto;
+  height: auto;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border-color: var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--low);
+}
+
+.dot-high {
+  background: var(--high);
+}
+
+.dot-medium {
+  background: var(--medium);
+}
+
+.empty,
+.one-line,
+.more {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.more {
+  margin-top: 6px;
+}
+
+.message {
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.message p {
+  margin: 0 0 12px;
+  color: var(--text-2);
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 22px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.foot-note {
+  flex: 1;
+  min-width: 0;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.link:hover,
+.link:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+  outline: none;
+}
+
+.btn {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  .btn-primary {
+    color: #1c1b1a;
+  }
+}
+
+/* "Blur until I hover" — for people who share their screen. */
+.is-blurred .headline,
+.is-blurred .row-text,
+.is-blurred .row-when {
+  filter: blur(5px);
+  transition: filter 0.15s;
+}
+
+.is-blurred .headline:hover,
+.is-blurred .row:hover .row-text,
+.is-blurred .row:hover .row-when,
+.is-blurred .row-main:focus-visible .row-text {
+  filter: none;
+}
+
+/* ── Popup ───────────────────────────────────────────────────────────────── */
+
+body.popup {
+  width: 380px;
+  padding: 14px 16px 12px;
+}
+
+body.popup .headline {
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+
+body.popup .foot {
+  margin-top: 14px;
+}
+
+/* ── Options ─────────────────────────────────────────────────────────────── */
+
+.options {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 40px 16px;
+}
+
+.options h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.options h2 {
+  margin: 28px 0 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.options p,
+.options li {
+  color: var(--text-2);
+}
+
+.options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.options select {
+  font: inherit;
+  padding: 4px 6px;
+}

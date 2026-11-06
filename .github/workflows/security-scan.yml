@@ -1,0 +1,42 @@
+name: Container vulnerability scan
+
+# Nightly rather than on every PR. The Trivy step runs with `exit-code: 0`, so
+# it reports without gating a merge, and the docker build plus the scan take
+# about four minutes; nightly keeps the signal without paying that per PR.
+
+on:
+  schedule:
+    # 08:17 UTC (~1:17am PT). Off the hour on purpose: GitHub queues scheduled
+    # runs hardest at :00, and a delayed start burns billable wait on a private repo.
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # Same reason as python-app.yml: cap the tail rather than inherit the
+    # 360-minute default. The build + scan take ~4 minutes.
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build local image for scanning
+      run: |
+        docker build -t locally/cubie:latest .
+
+    # Pinned rather than @master for the same SOC 2 H-8 determinism reason the
+    # ruff version is pinned in python-app.yml: a floating action tag is an
+    # unreviewed third-party code change landing straight in CI.
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        image-ref: 'locally/cubie:latest'
+        format: 'table'
+        exit-code: '0' # Don't fail build yet, just report
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'

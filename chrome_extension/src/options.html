@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cubie for Chrome settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="options">
+      <h1>Cubie for Chrome</h1>
+      <p>Your promises and today's priorities from Cubie, on every new tab.</p>
+
+      <h2>Connection</h2>
+      <p id="status"></p>
+      <div id="connect-row">
+        <label>
+          Cubie address
+          <select id="origin"></select>
+        </label>
+        <p><button class="btn btn-primary" id="connect" type="button">Connect to Cubie</button></p>
+      </div>
+      <p><button class="btn" id="signout" type="button" hidden>Disconnect this browser</button></p>
+
+      <h2>New tab</h2>
+      <label><input type="radio" name="density" value="full" /> Promises and today's priorities</label>
+      <label><input type="radio" name="density" value="compact" /> Promises only</label>
+      <label><input type="radio" name="density" value="minimal" /> One line under the search box</label>
+      <label><input type="checkbox" id="blur" /> Blur the details until I point at them (for screen sharing)</label>
+      <p>"Hide for today" at the bottom of the new tab hides Cubie until tomorrow.</p>
+
+      <h2>Toolbar</h2>
+      <label><input type="checkbox" id="badge" /> Show how many promises are past due on the Cubie icon</label>
+
+      <section id="shortcuts">
+        <h2>Shortcuts</h2>
+        <ul>
+          <li id="shortcut-omnibox">Type <strong>cubie</strong> and a space in the address bar, then your question, to ask Cubie.</li>
+          <li id="shortcut-menu">Select text on any page, right-click, and choose <strong>Ask Cubie about…</strong>.</li>
+        </ul>
+      </section>
+
+      <h2>What this extension can see</h2>
+      <p>
+        Only what Cubie sends it: your promises past due and this morning's priorities. It does not
+        read your email, your browsing or any other website. It never asks Cubie to make new
+        priorities, so opening tabs costs nothing.
+      </p>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

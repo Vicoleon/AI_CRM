@@ -1,0 +1,16 @@
+{
+  "addOns": {
+    "common": {
+      "name": "Cubie",
+      "logoUrl": "https://<CUBIE_PUBLIC_HOST>/cubie-meet-addon.png"
+    },
+    "meet": {
+      "web": {
+        "sidePanelUrl": "https://<CUBIE_PUBLIC_HOST>/meet-addon/side-panel",
+        "supportsScreenSharing": false,
+        "addOnOrigins": ["https://<CUBIE_PUBLIC_HOST>"],
+        "logoUrl": "https://<CUBIE_PUBLIC_HOST>/cubie-meet-addon.png"
+      }
+    }
+  }
+}

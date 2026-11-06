@@ -1,0 +1,30 @@
+# This is the complete Cloud Run Job roster. All jobs use the same image digest.
+# Dispatchers add CUBIE_WORKSPACE to individual executions, never to these specs.
+version: 1
+jobs:
+  - name: cubie-migrate
+    module: rubik_core.platform.deployment
+    args: [migrate]
+    timeout: 3600
+    tasks: 1
+    parallelism: 1
+  - name: cubie-worker
+    module: backend.jobs.worker
+    timeout: 3600
+    tasks: 1
+    parallelism: 1
+  - name: cubie-priorities-batch
+    module: rubik_core.priorities.batch_runner
+    timeout: 7200
+    tasks: 4
+    parallelism: 4
+  - name: cubie-deep-prep
+    module: backend.jobs.deep_prep_job
+    timeout: 1800
+    tasks: 1
+    parallelism: 1
+  - name: cubie-xray-deep
+    module: backend.jobs.xray_deep_job
+    timeout: 1800
+    tasks: 1
+    parallelism: 1
