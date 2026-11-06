@@ -1213,9 +1213,16 @@ def test_job_entrypoint_requires_the_run(monkeypatch):
 # ─── The Job carries what a brief reads ───────────────────────────────────────
 
 
-def test_deep_prep_job_has_platform_only_secrets_and_workspace_routing():
+def test_deep_prep_job_has_platform_only_secrets_and_workspace_routing(monkeypatch):
     from rubik_core.platform.deployment import _runtime_env, _runtime_secrets, load_jobs
 
+    for name, value in {
+        "CUBIE_PROVISION_DB_MAX_CONNECTIONS": "200",
+        "CUBIE_PROVISION_SERVICE_MAX_INSTANCES": "1",
+        "CUBIE_PROVISION_JOB_MAX_INSTANCES": "8",
+        "CUBIE_PROVISION_RESERVED_CONNECTIONS": "30",
+    }.items():
+        monkeypatch.setenv(name, value)
     job = next(row for row in load_jobs() if row["name"] == "cubie-deep-prep")
     assert job["module"] == "backend.jobs.deep_prep_job"
     env = _runtime_env(

@@ -18,13 +18,49 @@ provisioning: the connection budget is
 still occupy physical PostgreSQL slots during a managed corpus write. Set the four
 `CUBIE_PROVISION_*` capacity values and leave headroom for administrative work.
 
-## 2. Bootstrap once, then inspect
+## 2. Bootstrap resources, then initialize control
 
-Run `scripts/platform/bootstrap_gcp.sh --env <private-env> --dry-run --fresh-install` and review
-the APIs, IAM, Postgres instance/control database, bucket, repository and
-platform secret placeholders it proposes. The real bootstrap is an explicit
-operator action after that review; use `--fresh-install` only for a genuinely
-fresh control database. A normal deploy must never create or repair a
+Run `scripts/platform/bootstrap_gcp.sh --env <private-env> --phase resources --dry-run`
+and review the project, region, explicit SQL edition/tier/storage/availability,
+bucket, runtime IAM and empty platform secret containers. Record the proposed
+cost before approving the same command without `--dry-run`. Resource bootstrap
+does not create a database user, initialize the control schema or populate
+database credentials. Set `CUBIE_SQL_EDITION=ENTERPRISE` explicitly; PostgreSQL
+16 otherwise defaults to Enterprise Plus in supported regions.
+
+After the SQL instance exists, create a dedicated provisioning SQL user with
+the required database/role administration privileges. Generate its password
+privately and pass it in an SQL Admin API request body, never a command
+argument or log. Preserve any existing user; do not reset its password as part
+of a bootstrap retry. Configure a loopback Cloud SQL Auth Proxy for the exact
+instance and verify its identity. Google CLI sign-in and Python Application
+Default Credentials are separate: verify the RubikSoft operator's ADC before
+the proxy or workspace provisioner uses it. Prefer a Cubie-specific credential
+file rather than replacing another application's credentials.
+
+For PostgreSQL 16, initialization establishes owner membership only when it
+creates a new control role. Reusing an existing role requires the operator's
+SET and inherited owner privileges to be present already; preflight refuses
+missing membership before changing SQL or secrets.
+
+SQL storage auto-increase is disabled so the reviewed size is the initial
+cost boundary. Monitor disk usage and approve a later storage increase before
+the instance fills; a bootstrap retry never resizes an existing instance.
+
+Prepare paired operator proxy and runtime socket URLs for both control and
+provisioning identities, with credentials kept private. Check the declared
+capacity against live PostgreSQL `SHOW max_connections`; include aggregate
+Job executions, advisory connections and reserved headroom. The service limit
+is applied to Cloud Run; the Job budget does not prevent overlapping executions.
+
+Then run `scripts/platform/bootstrap_gcp.sh --env <private-env> --phase control --fresh-install --dry-run`.
+This phase requires the existing SQL target and working admin connection and
+checks privileges, capacity, ownership and an empty control target before any
+write. Review it before running the same command without `--dry-run` under
+the approved bootstrap target and scope. Use
+`--fresh-install` only for a genuinely fresh control database. The compatibility
+`--phase all` path requires SQL/proxy prerequisites already prepared; use the
+two phases for a new instance. A normal deploy must never create or repair a
 missing/corrupt control schema.
 
 ## 3. Prepare identity and client setup

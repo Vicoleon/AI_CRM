@@ -291,6 +291,74 @@ def _required(name: str) -> str:
     return value
 
 
+def _capacity_settings() -> dict[str, str]:
+    """Use one explicit connection budget in preflight and runtime onboarding."""
+    from rubik_core.platform.provision import (
+        ConnectionBudget,
+        check_connection_headroom,
+    )
+
+    names = (
+        "CUBIE_PROVISION_DB_MAX_CONNECTIONS",
+        "CUBIE_PROVISION_SERVICE_MAX_INSTANCES",
+        "CUBIE_PROVISION_JOB_MAX_INSTANCES",
+    )
+    values = {name: _required(name) for name in names}
+    reserve = os.environ.get("CUBIE_PROVISION_RESERVED_CONNECTIONS", "10").strip()
+    if any(not value.isdecimal() or int(value) < 1 for value in values.values()):
+        raise DeployBlocked("Provisioning capacity values must be positive integers")
+    if not reserve.isdecimal():
+        raise DeployBlocked("Provisioning reserved connections must be nonnegative")
+    values["CUBIE_PROVISION_RESERVED_CONNECTIONS"] = reserve
+    try:
+        check_connection_headroom(
+            1,
+            ConnectionBudget(
+                *(int(values[name]) for name in names), reserve=int(reserve)
+            ),
+        )
+    except ValueError:
+        raise DeployBlocked(
+            "Provisioning capacity cannot safely fit one workspace"
+        ) from None
+    return values
+
+
+@dataclass(frozen=True)
+class SqlResources:
+    edition: str
+    tier: str
+    storage_gb: int
+    availability: str
+
+
+def _sql_resources() -> SqlResources:
+    """Require a reviewed SQL size; PostgreSQL 16 must not default to Plus."""
+    edition = _required("CUBIE_SQL_EDITION")
+    tier = _required("CUBIE_SQL_TIER")
+    storage = _required("CUBIE_SQL_STORAGE_GB")
+    availability = _required("CUBIE_SQL_AVAILABILITY_TYPE")
+    if edition != "ENTERPRISE":
+        raise DeployBlocked("CUBIE_SQL_EDITION must be ENTERPRISE")
+    custom = re.fullmatch(r"db-custom-([0-9]+)-([0-9]+)", tier)
+    if custom:
+        cpu, memory = map(int, custom.groups())
+        if (
+            cpu not in (1, *range(2, 97, 2))
+            or memory < max(3840, cpu * 922)
+            or memory > cpu * 6656
+            or memory % 256
+        ):
+            raise DeployBlocked("CUBIE_SQL_TIER has an invalid custom CPU/memory size")
+    elif tier not in ("db-f1-micro", "db-g1-small"):
+        raise DeployBlocked("CUBIE_SQL_TIER must be a supported Enterprise tier")
+    if not storage.isdecimal() or not 10 <= int(storage) <= 65536:
+        raise DeployBlocked("CUBIE_SQL_STORAGE_GB must be between 10 and 65536")
+    if availability not in ("ZONAL", "REGIONAL"):
+        raise DeployBlocked("CUBIE_SQL_AVAILABILITY_TYPE must be ZONAL or REGIONAL")
+    return SqlResources(edition, tier, int(storage), availability)
+
+
 def _validate_targets(
     project: str,
     region: str,
@@ -492,6 +560,7 @@ def _runtime_env(
     values["CUBIE_PROVISION_RUNTIME_SERVICE_ACCOUNT"] = (
         f"cubie-runtime@{project}.iam.gserviceaccount.com"
     )
+    values.update(_capacity_settings())
     gmail = _gmail_oauth_config()
     if gmail:
         values["GOOGLE_GMAIL_OAUTH_CLIENT_ID"] = gmail[0]
@@ -597,6 +666,7 @@ def deploy(*, dry_run: bool) -> None:
     check_freezes(state)
     sha = check_tree()
     jobs = load_jobs()
+    capacity = _capacity_settings()
     gmail = _gmail_oauth_config()
     if not dry_run:
         _required("VITE_MEET_ADDON_CLOUD_PROJECT_NUMBER")
@@ -708,7 +778,7 @@ def deploy(*, dry_run: bool) -> None:
         "--memory=2Gi",
         "--cpu=2",
         "--min-instances=1",
-        "--max-instances=3",
+        f"--max-instances={capacity['CUBIE_PROVISION_SERVICE_MAX_INSTANCES']}",
         "--concurrency=8",
         "--timeout=300",
         f"--update-labels=commit={sha[:12]}",
@@ -835,15 +905,19 @@ def _create_fresh_control_database() -> None:
         engine = create_engine(admin, isolation_level="AUTOCOMMIT")
         try:
             with engine.connect() as connection:
-                existing_database = (
-                    connection.scalar(
-                        text("SELECT 1 FROM pg_database WHERE datname=:name"),
-                        {"name": database},
-                    )
-                    is not None
+                existing_owner = connection.scalar(
+                    text(
+                        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=:name"
+                    ),
+                    {"name": database},
                 )
+                existing_database = existing_owner is not None
+                if existing_database and existing_owner != user:
+                    raise DeployBlocked(
+                        "Existing control database has a different owner"
+                    )
                 if existing_database:
-                    inspect_engine = create_engine(admin.set(database=database))
+                    inspect_engine = create_engine(target)
                     try:
                         with inspect_engine.connect() as db_connection:
                             if inspect(db_connection).get_table_names():
@@ -860,15 +934,24 @@ def _create_fresh_control_database() -> None:
                     )
                     is None
                 ):
-                    connection.exec_driver_sql(f'CREATE ROLE "{user}" LOGIN')
-                quoted_password = connection.scalar(
-                    text("SELECT quote_literal(:password)"), {"password": password}
-                )
-                if not isinstance(quoted_password, str):
-                    raise DeployBlocked("Control password quoting failed")
-                connection.exec_driver_sql(
-                    f'ALTER ROLE "{user}" WITH PASSWORD {quoted_password}'
-                )
+                    # PostgreSQL 16 gives CREATEROLE users ADMIN membership
+                    # without SET/INHERIT by default. Ownership assignment and
+                    # the CONNECT grants below need both for this new role.
+                    connection.exec_driver_sql(
+                        "SET createrole_self_grant = 'set,inherit'"
+                    )
+                    try:
+                        connection.exec_driver_sql(f'CREATE ROLE "{user}" LOGIN')
+                    finally:
+                        connection.exec_driver_sql("RESET createrole_self_grant")
+                    quoted_password = connection.scalar(
+                        text("SELECT quote_literal(:password)"), {"password": password}
+                    )
+                    if not isinstance(quoted_password, str):
+                        raise DeployBlocked("Control password quoting failed")
+                    connection.exec_driver_sql(
+                        f'ALTER ROLE "{user}" WITH PASSWORD {quoted_password}'
+                    )
                 if not existing_database:
                     connection.exec_driver_sql(
                         f'CREATE DATABASE "{database}" OWNER "{user}"'
@@ -896,58 +979,57 @@ def _create_fresh_control_database() -> None:
         raise DeployBlocked("Control database creation or inspection failed") from None
 
 
-def bootstrap(*, dry_run: bool, fresh_install: bool) -> None:
-    project = _required("GCP_PROJECT_ID")
-    region = _required("GCP_REGION")
-    instance = _required("CLOUDSQL_INSTANCE")
-    bucket = _required("GCS_BUCKET_NAME")
-    _required("CONTROL_DATABASE_URL")
-    _validate_targets(
-        project, region, instance, bucket, _required("CUBIE_RUNTIME_SERVICE_ACCOUNT")
-    )
-    gmail = _gmail_oauth_config()
-    if not dry_run:
-        _runtime_control_url(project, region, instance)
-        _runtime_admin_url(project, region, instance)
-    if fresh_install:
-        try:
-            url = make_url(os.environ["CONTROL_DATABASE_URL"])
-        except Exception:
-            raise DeployBlocked("CONTROL_DATABASE_URL is invalid", 7) from None
-        target_missing = (
-            url.get_backend_name() == "sqlite" and not Path(url.database or "").exists()
+_PLATFORM_SECRETS = (
+    "CUBIE_SESSION_SECRET",
+    "CUBIE_OAUTH_STATE_SECRET",
+    "CUBIE_PERSONAL_TOKEN_FERNET_KEY",
+    "SCHEDULER_API_KEY",
+    "CUBIE_CONTROL_DATABASE_URL",
+    "CUBIE_PROVISION_ADMIN_DATABASE_URL",
+)
+
+
+def _platform_secret_names(gmail: tuple[str, str, str] | None) -> tuple[str, ...]:
+    return _PLATFORM_SECRETS + (("GOOGLE_GMAIL_OAUTH_CLIENT_SECRET",) if gmail else ())
+
+
+def _validate_existing_sql_resource(
+    described: str, project: str, region: str, instance: str, sql: SqlResources
+) -> None:
+    """A retry may reuse the approved instance, but must never resize one."""
+    try:
+        data = json.loads(described)
+        settings = data["settings"]
+        matches = (
+            data["name"] == instance
+            and data["connectionName"] == f"{project}:{region}:{instance}"
+            and data["region"] == region
+            and data["state"] == "RUNNABLE"
+            and data["databaseVersion"] == "POSTGRES_16"
+            and settings["edition"] == sql.edition
+            and settings["tier"] == sql.tier
+            and int(settings["dataDiskSizeGb"]) == sql.storage_gb
+            and settings["dataDiskType"] == "PD_SSD"
+            and settings["availabilityType"] == sql.availability
+            and settings.get("storageAutoResize", False) is False
         )
-        if not target_missing and not (
-            dry_run and url.get_backend_name() == "postgresql"
-        ):
-            try:
-                engine = create_engine(url)
-                try:
-                    with engine.connect() as connection:
-                        tables = set(inspect(connection).get_table_names())
-                finally:
-                    engine.dispose()
-            except Exception:
-                # A Postgres target may not exist yet, but we must verify that
-                # against the separately configured admin connection below.
-                if url.get_backend_name() != "postgresql":
-                    raise DeployBlocked(
-                        "Fresh control target is unreadable", 7
-                    ) from None
-                tables = set()
-            if tables:
-                raise DeployBlocked(
-                    "Fresh baseline refused: control database already has tables", 7
-                )
-    if dry_run:
-        print(
-            f"DRY RUN: enable platform APIs, ensure bucket {bucket}, SQL instance {instance}, runtime identity and six secret resources in {project}/{region}"
+    except (KeyError, TypeError, ValueError):
+        matches = False
+    if not matches:
+        raise DeployBlocked(
+            "Existing SQL instance differs from the approved resource configuration; bootstrap never resizes or patches it"
         )
-        if gmail:
-            print("DRY RUN: ensure optional Gmail OAuth client secret")
-        if fresh_install:
-            print("DRY RUN: initialize the empty control Alembic baseline")
-        return
+
+
+def _ensure_platform_resources(
+    project: str,
+    region: str,
+    instance: str,
+    bucket: str,
+    runtime_account: str,
+    sql: SqlResources,
+    gmail: tuple[str, str, str] | None,
+) -> None:
     apis = [
         "run.googleapis.com",
         "cloudbuild.googleapis.com",
@@ -966,6 +1048,16 @@ def bootstrap(*, dry_run: bool, fresh_install: bool) -> None:
         f"--project={project}",
         label="Platform API enablement",
     )
+    existing_sql = _gcloud_maybe(
+        "sql",
+        "instances",
+        "describe",
+        instance,
+        f"--project={project}",
+        "--format=json",
+    )
+    if existing_sql is not None:
+        _validate_existing_sql_resource(existing_sql, project, region, instance, sql)
     if (
         _gcloud_maybe(
             "storage", "buckets", "describe", f"gs://{bucket}", f"--project={project}"
@@ -981,11 +1073,7 @@ def bootstrap(*, dry_run: bool, fresh_install: bool) -> None:
             f"--location={region}",
             label="Bucket create",
         )
-    if (
-        _gcloud_maybe("sql", "instances", "describe", instance, f"--project={project}")
-        is None
-    ):
-        tier = _required("CUBIE_SQL_TIER")
+    if existing_sql is None:
         _gcloud(
             "sql",
             "instances",
@@ -993,7 +1081,12 @@ def bootstrap(*, dry_run: bool, fresh_install: bool) -> None:
             instance,
             f"--project={project}",
             f"--region={region}",
-            f"--tier={tier}",
+            f"--tier={sql.tier}",
+            f"--edition={sql.edition}",
+            f"--storage-size={sql.storage_gb}",
+            "--storage-type=SSD",
+            "--no-storage-auto-increase",
+            f"--availability-type={sql.availability}",
             "--database-version=POSTGRES_16",
             label="SQL instance create",
         )
@@ -1037,16 +1130,7 @@ def bootstrap(*, dry_run: bool, fresh_install: bool) -> None:
             "--quiet",
             label="Runtime role grant",
         )
-    if fresh_install:
-        _create_fresh_control_database()
-    for name in (
-        "CUBIE_SESSION_SECRET",
-        "CUBIE_OAUTH_STATE_SECRET",
-        "CUBIE_PERSONAL_TOKEN_FERNET_KEY",
-        "SCHEDULER_API_KEY",
-        "CUBIE_CONTROL_DATABASE_URL",
-        "CUBIE_PROVISION_ADMIN_DATABASE_URL",
-    ):
+    for name in _platform_secret_names(gmail):
         if _gcloud_maybe("secrets", "describe", name, f"--project={project}") is None:
             _gcloud(
                 "secrets",
@@ -1054,84 +1138,283 @@ def bootstrap(*, dry_run: bool, fresh_install: bool) -> None:
                 name,
                 "--replication-policy=automatic",
                 f"--project={project}",
-                label="Secret create",
+                label="Secret container create",
             )
-        existing = _gcloud_maybe(
-            "secrets",
-            "versions",
-            "access",
-            "latest",
-            f"--secret={name}",
-            f"--project={project}",
+
+
+def _control_bootstrap_preflight(
+    project: str, region: str, instance: str, *, fresh_install: bool
+) -> None:
+    """Prove the operator connection and empty target without SQL/cloud writes."""
+    described = _gcloud_maybe(
+        "sql",
+        "instances",
+        "describe",
+        instance,
+        f"--project={project}",
+        "--format=json",
+    )
+    if described is None:
+        raise DeployBlocked(
+            "SQL instance is unavailable; run bootstrap --phase resources, then prepare its operator SQL access"
         )
+    try:
+        data = json.loads(described)
+        matches = (
+            data["name"] == instance
+            and data["region"] == region
+            and data["connectionName"] == f"{project}:{region}:{instance}"
+            and data["state"] == "RUNNABLE"
+            and data["databaseVersion"] == "POSTGRES_16"
+        )
+    except (KeyError, ValueError, TypeError, AttributeError):
+        matches = False
+    if not matches:
+        raise DeployBlocked(
+            "SQL instance does not match the declared runnable PostgreSQL target"
+        )
+    _runtime_control_url(project, region, instance)
+    _runtime_admin_url(project, region, instance)
+    target = make_url(_required("CONTROL_DATABASE_URL"))
+    admin = make_url(_required("CUBIE_PROVISION_ADMIN_DATABASE_URL"))
+    if (target.host, target.port, target.query) != (
+        admin.host,
+        admin.port,
+        admin.query,
+    ):
+        raise DeployBlocked("Control and admin URLs must target the same SQL instance")
+    if target.username == admin.username or not all(
+        re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", name or "")
+        for name in (target.username, target.database)
+    ):
+        raise DeployBlocked("Control database requires its own named role and database")
+    capacity = _capacity_settings()
+    try:
+        engine = create_engine(admin, pool_pre_ping=True)
+        try:
+            with engine.connect() as connection:
+                role = (
+                    connection.execute(
+                        text(
+                            "SELECT rolsuper, rolcreatedb, rolcreaterole FROM pg_roles WHERE rolname=current_user"
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                if not (
+                    role["rolsuper"] or (role["rolcreatedb"] and role["rolcreaterole"])
+                ):
+                    raise DeployBlocked(
+                        "SQL operator must be able to create roles and databases"
+                    )
+                actual_max = int(connection.scalar(text("SHOW max_connections")))
+                if int(capacity["CUBIE_PROVISION_DB_MAX_CONNECTIONS"]) > actual_max:
+                    raise DeployBlocked(
+                        "Declared connection capacity exceeds PostgreSQL max_connections"
+                    )
+                database = (
+                    connection.execute(
+                        text(
+                            "SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname=:name"
+                        ),
+                        {"name": target.database},
+                    )
+                    .mappings()
+                    .first()
+                )
+                role_exists = (
+                    connection.scalar(
+                        text("SELECT 1 FROM pg_roles WHERE rolname=:name"),
+                        {"name": target.username},
+                    )
+                    is not None
+                )
+                if role_exists:
+                    membership = (
+                        connection.execute(
+                            text(
+                                "SELECT pg_has_role(current_user, :name, 'SET') AS can_set, "
+                                "pg_has_role(current_user, :name, 'USAGE') AS can_inherit"
+                            ),
+                            {"name": target.username},
+                        )
+                        .mappings()
+                        .one()
+                    )
+                    if not (membership["can_set"] and membership["can_inherit"]):
+                        raise DeployBlocked(
+                            "Existing control role membership requires reviewed SET and INHERIT access for the SQL operator; bootstrap never expands existing role grants"
+                        )
+                if database is not None and database["owner"] != target.username:
+                    raise DeployBlocked(
+                        "Existing control database has a different owner"
+                    )
+        finally:
+            engine.dispose()
+        if database is None and not fresh_install:
+            raise DeployBlocked(
+                "Control database is absent; use --fresh-install only for a new empty control database"
+            )
+        # Never overwrite an existing role's password. Prove the supplied
+        # identity can connect before reusing a partially prepared role.
+        if database is not None or role_exists:
+            verify = (
+                target if database is not None else target.set(database=admin.database)
+            )
+            target_engine = create_engine(verify, pool_pre_ping=True)
+            try:
+                with target_engine.connect() as connection:
+                    tables = (
+                        inspect(connection).get_table_names()
+                        if database is not None
+                        else []
+                    )
+                    if fresh_install and tables:
+                        raise DeployBlocked(
+                            "Fresh baseline refused: control database already has tables",
+                            7,
+                        )
+            finally:
+                target_engine.dispose()
+    except DeployBlocked:
+        raise
+    except Exception:
+        raise DeployBlocked(
+            "SQL operator proxy, credentials or control identity could not be verified",
+            7,
+        ) from None
+    if not fresh_install:
+        check_freezes(read_control())
+
+
+def _control_secret_plan(
+    project: str, region: str, instance: str, gmail: tuple[str, str, str] | None
+) -> list[tuple[str, str]]:
+    """Read all existing containers and values before any control mutation."""
+    pending = []
+    for name in _platform_secret_names(gmail):
+        if _gcloud_maybe("secrets", "describe", name, f"--project={project}") is None:
+            raise DeployBlocked(
+                "Platform secret container is unavailable; run bootstrap --phase resources first"
+            )
+        try:
+            versions = json.loads(
+                _gcloud(
+                    "secrets",
+                    "versions",
+                    "list",
+                    name,
+                    f"--project={project}",
+                    "--sort-by=~createTime",
+                    "--limit=1",
+                    "--format=json(name,state)",
+                    label="Platform secret version inspection",
+                )
+            )
+            if not isinstance(versions, list):
+                raise ValueError
+            if versions and versions[0]["state"] != "ENABLED":
+                raise DeployBlocked(
+                    "Latest platform secret version must be enabled; existing secrets are never rotated by bootstrap"
+                )
+        except (ValueError, TypeError, KeyError, IndexError):
+            raise DeployBlocked("Platform secret version state is unreadable") from None
+        existing = _secret_value(project, name) if versions else None
         if name == "CUBIE_CONTROL_DATABASE_URL":
             wanted = _runtime_control_url(project, region, instance)
-            if existing and existing != wanted:
-                raise DeployBlocked("Control URL secret differs from declared target")
         elif name == "CUBIE_PROVISION_ADMIN_DATABASE_URL":
             wanted = _runtime_admin_url(project, region, instance)
-            if existing and existing != wanted:
-                raise DeployBlocked("Admin URL secret differs from declared target")
+        elif name == "GOOGLE_GMAIL_OAUTH_CLIENT_SECRET":
+            wanted = gmail[1]
         else:
-            wanted = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+            wanted = (
+                existing or base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
+            )
+        if existing is not None and existing != wanted:
+            raise DeployBlocked(
+                "Platform database or Gmail secret differs from declared target"
+            )
         if existing is None:
-            _gcloud(
-                "secrets",
-                "versions",
-                "add",
-                name,
-                "--data-file=-",
-                f"--project={project}",
-                input_text=wanted,
-                label="Secret version add",
+            pending.append((name, wanted))
+    return pending
+
+
+def bootstrap(*, dry_run: bool, fresh_install: bool, phase: str = "all") -> None:
+    if phase not in ("resources", "control", "all"):
+        raise DeployBlocked("Bootstrap phase must be resources, control or all")
+    if phase == "resources" and fresh_install:
+        raise DeployBlocked(
+            "--fresh-install applies to the control phase, not resources"
+        )
+    project = _required("GCP_PROJECT_ID")
+    region = _required("GCP_REGION")
+    instance = _required("CLOUDSQL_INSTANCE")
+    bucket = _required("GCS_BUCKET_NAME")
+    runtime_account = _required("CUBIE_RUNTIME_SERVICE_ACCOUNT")
+    _validate_targets(project, region, instance, bucket, runtime_account)
+    _capacity_settings()
+    gmail = _gmail_oauth_config()
+    sql = _sql_resources() if phase in ("resources", "all") else None
+    pending = []
+    if phase in ("control", "all"):
+        # Even the compatibility 'all' path requires a usable existing SQL
+        # instance. A new project uses resources, operator setup, then control.
+        _control_bootstrap_preflight(
+            project, region, instance, fresh_install=fresh_install
+        )
+        pending = _control_secret_plan(project, region, instance, gmail)
+    if dry_run:
+        if sql:
+            print(
+                f"DRY RUN: ensure APIs, bucket {bucket}, SQL {instance} ({sql.edition}, {sql.tier}, {sql.storage_gb} GiB SSD, {sql.availability}, storage auto-increase disabled), runtime identity and secret containers in {project}/{region}"
             )
-    if gmail:
-        name = "GOOGLE_GMAIL_OAUTH_CLIENT_SECRET"
-        if _gcloud_maybe("secrets", "describe", name, f"--project={project}") is None:
-            _gcloud(
-                "secrets",
-                "create",
-                name,
-                "--replication-policy=automatic",
-                f"--project={project}",
-                label="Gmail OAuth secret create",
+        if phase in ("control", "all"):
+            print(
+                "DRY RUN: verified SQL operator and control target; initialize missing secret versions"
+                + (" and the empty control Alembic baseline" if fresh_install else "")
             )
-        existing = _gcloud_maybe(
+        return
+    if sql:
+        _ensure_platform_resources(
+            project, region, instance, bucket, runtime_account, sql, gmail
+        )
+    if phase == "resources":
+        print(
+            "Platform resources prepared; configure SQL operator credentials and loopback Auth Proxy, then run bootstrap --phase control --fresh-install"
+        )
+        return
+    if fresh_install:
+        _create_fresh_control_database()
+    for name, value in pending:
+        _gcloud(
             "secrets",
             "versions",
-            "access",
-            "latest",
-            f"--secret={name}",
+            "add",
+            name,
+            "--data-file=-",
             f"--project={project}",
+            input_text=value,
+            label="Secret version add",
         )
-        if existing and existing != gmail[1]:
-            raise DeployBlocked("Gmail OAuth secret differs from declared value")
-        if existing is None:
-            _gcloud(
-                "secrets",
-                "versions",
-                "add",
-                name,
-                "--data-file=-",
-                f"--project={project}",
-                input_text=gmail[1],
-                label="Gmail OAuth secret version add",
-            )
     if fresh_install:
         from rubik_core.platform.migrate import migrate_control
 
-        os.environ["APP_MODE"] = "gcp"
+        previous_mode = os.environ.get("APP_MODE")
         previous = os.environ.get("ALEMBIC_ALLOW_REMOTE")
         try:
-            # The named fresh installer has already proved that this exact DB
-            # is empty. This is the only local path allowed to run its baseline.
+            os.environ["APP_MODE"] = "gcp"
             os.environ["ALEMBIC_ALLOW_REMOTE"] = "1"
             migrated = migrate_control()
         finally:
-            if previous is None:
-                os.environ.pop("ALEMBIC_ALLOW_REMOTE", None)
-            else:
-                os.environ["ALEMBIC_ALLOW_REMOTE"] = previous
+            for key, value in (
+                ("APP_MODE", previous_mode),
+                ("ALEMBIC_ALLOW_REMOTE", previous),
+            ):
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         print(f"Control baseline initialized at {migrated}")
 
 
@@ -1143,6 +1426,9 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap_parser = commands.add_parser("bootstrap")
     bootstrap_parser.add_argument("--dry-run", action="store_true")
     bootstrap_parser.add_argument("--fresh-install", action="store_true")
+    bootstrap_parser.add_argument(
+        "--phase", choices=("resources", "control", "all"), default="all"
+    )
     commands.add_parser("migrate")
     commands.add_parser("preflight")
     args = parser.parse_args(argv)
@@ -1150,7 +1436,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "deploy":
             deploy(dry_run=args.dry_run)
         elif args.command == "bootstrap":
-            bootstrap(dry_run=args.dry_run, fresh_install=args.fresh_install)
+            bootstrap(
+                dry_run=args.dry_run, fresh_install=args.fresh_install, phase=args.phase
+            )
         elif args.command == "preflight":
             preflight()
         else:

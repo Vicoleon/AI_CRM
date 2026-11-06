@@ -278,6 +278,8 @@ workspace freeze windows, including the 20-minute lead. See
 [`docs/GO_LIVE.md`](docs/GO_LIVE.md) for the ordered go-live checklist,
 [`docs/migrations_guide.md`](docs/migrations_guide.md) for migrations and
 [`docs/deployment_rollback.md`](docs/deployment_rollback.md) for rollback.
+For a fresh platform, bootstrap `--phase resources` first, prepare the SQL
+operator identity and local proxy, then run `--phase control --fresh-install`.
 
 ## Roadmap
 
