@@ -262,3 +262,38 @@ def test_pg16_existing_role_without_owner_membership_is_refused_before_writes(
     assert membership_exists is False
     unchanged = _password_verifier(case) == verifier
     assert unchanged, "Refused preflight must not reset an existing control role"
+
+
+def test_pg16_non_superuser_provisions_workspace_database(pg_bootstrap_case):
+    from rubik_core.control.models import WorkspaceConnectionSpec
+    from rubik_core.platform.executor import CloudExecutor
+
+    case = pg_bootstrap_case
+    spec = WorkspaceConnectionSpec(case.target, case.target, "test")
+    executor = object.__new__(CloudExecutor)
+    executor.admin_database_url = case.operator_url.render_as_string(
+        hide_password=False
+    )
+
+    executor.ensure_database(spec, case.target_url.password)
+    _assert_owner_login(case)
+    with case.admin.connect() as connection:
+        owner = connection.scalar(
+            text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=:name"),
+            {"name": case.target},
+        )
+        public_connect = connection.scalar(
+            text("""
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_database AS db,
+                    LATERAL aclexplode(COALESCE(db.datacl, acldefault('d', db.datdba))) AS acl
+                    WHERE db.datname=:name AND acl.grantee=0 AND acl.privilege_type='CONNECT'
+                )
+            """),
+            {"name": case.target},
+        )
+    assert owner == case.target
+    assert public_connect is False
+
+    executor.ensure_database(spec, case.target_url.password)
+    _assert_owner_login(case)

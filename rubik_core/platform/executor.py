@@ -14,6 +14,7 @@ from rubik_core.brand import PRODUCT_NAME
 from rubik_core.config import AppMode, settings
 from rubik_core.control.models import WorkspaceConnectionSpec
 from rubik_core.platform.provision import CreateSpec, database_grants_sql
+from rubik_core.platform.sql_roles import create_database_owner_role
 from rubik_core.tenancy.context import use_workspace
 from rubik_core.tenancy.storage import local_data_dir
 
@@ -153,7 +154,7 @@ class CloudExecutor:
                     {"name": spec.db_user},
                 )
                 if role is None:
-                    connection.exec_driver_sql(f'CREATE ROLE "{spec.db_user}" LOGIN')
+                    create_database_owner_role(connection, spec.db_user)
                 try:
                     # ALTER ROLE cannot accept a bind parameter. Have PostgreSQL
                     # quote the bound secret, then use that literal in the DDL.

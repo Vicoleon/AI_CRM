@@ -27,6 +27,20 @@ jobs:
     # hung job bills all of it. Fail it instead.
     timeout-minutes: 30
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Disposable CI-only credentials for this runner's temporary database.
+          POSTGRES_PASSWORD: cubie-ci-disposable
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v4
       with:
@@ -166,6 +180,7 @@ jobs:
         GOOGLE_WORKSPACE_DOMAIN: company.com
         CLOUDSQL_CONNECTION_NAME: ""
         DB_USER: ""
+        CUBIE_TEST_PG_ADMIN_URL: postgresql+pg8000://postgres:cubie-ci-disposable@127.0.0.1:5432/postgres
 
   frontend:
 

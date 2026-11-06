@@ -682,12 +682,16 @@ def test_control_database_retry_preserves_existing_role_credentials(
     assert writes == expected
 
 
-@pytest.mark.parametrize("create_fails", [False, True])
+@pytest.mark.parametrize(
+    ("membership_ready", "create_fails"),
+    [(True, False), (False, False), (False, True)],
+)
 def test_new_control_role_configures_pg16_membership_only_while_creating_role(
-    platform_env, monkeypatch, create_fails
+    platform_env, monkeypatch, membership_ready, create_fails
 ):
     _control_urls(monkeypatch)
     writes = []
+    membership_checks = []
 
     class Connection:
         def __enter__(self):
@@ -698,6 +702,14 @@ def test_new_control_role_configures_pg16_membership_only_while_creating_role(
 
         def scalar(self, statement, params=None):
             sql = str(statement)
+            if "pg_has_role" in sql:
+                assert params == {"owner": "control"}
+                assert "'SET'" in sql and "'USAGE'" in sql
+                membership_checks.append((sql, len(writes)))
+                return membership_ready or any(
+                    item.startswith('GRANT "control" TO CURRENT_USER')
+                    for item in writes
+                )
             if "quote_literal" in sql:
                 return "'control-pass'"
             assert "FROM pg_database" in sql or "FROM pg_roles" in sql
@@ -707,6 +719,10 @@ def test_new_control_role_configures_pg16_membership_only_while_creating_role(
             writes.append(sql)
             if create_fails and sql.startswith("CREATE ROLE "):
                 raise RuntimeError("simulated role creation failure")
+            if membership_ready and sql.startswith('GRANT "control" TO CURRENT_USER'):
+                raise RuntimeError(
+                    "ADMIN option cannot be granted back to your own grantor"
+                )
 
     class Engine:
         def connect(self):
@@ -741,12 +757,20 @@ def test_new_control_role_configures_pg16_membership_only_while_creating_role(
     if create_fails:
         assert len(writes) == reset + 1
         assert membership_grant not in writes
+        assert membership_checks == []
     else:
-        grant = writes.index(membership_grant)
         create_database = next(
             i for i, sql in enumerate(writes) if sql.startswith("CREATE DATABASE ")
         )
-        assert reset < grant < create_database
+        assert membership_checks[0][1] == reset + 1
+        if membership_ready:
+            assert len(membership_checks) == 1
+            assert membership_grant not in writes
+        else:
+            assert len(membership_checks) == 2
+            grant = writes.index(membership_grant)
+            assert reset < grant < create_database
+            assert membership_checks[1][1] == grant + 1
 
 
 def test_runtime_env_carries_capacity_settings(platform_env):

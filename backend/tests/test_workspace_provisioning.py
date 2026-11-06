@@ -407,6 +407,8 @@ def test_cloud_role_password_ddl_uses_safe_literal_and_sanitizes_error(monkeypat
 
         def scalar(self, statement, params):
             self.bound_queries.append((str(statement), params))
+            if "pg_has_role" in str(statement):
+                return True
             if "quote_literal" in str(statement):
                 if self.fail_quote:
                     raise RuntimeError(f"driver included secret {password}")
@@ -460,6 +462,98 @@ def test_cloud_role_password_ddl_uses_safe_literal_and_sanitizes_error(monkeypat
     ) as quote_error:
         executor.ensure_database(db_spec, password)
     assert password not in str(quote_error.value)
+
+
+@pytest.mark.parametrize("role", ["", 'role"; DROP ROLE other; --'])
+def test_database_owner_role_rejects_unsafe_identifier_before_sql(role):
+    from rubik_core.platform.sql_roles import create_database_owner_role
+
+    class Connection:
+        def exec_driver_sql(self, statement):
+            pytest.fail("Invalid identifier reached SQL")
+
+    with pytest.raises(ValueError, match="role identifier"):
+        create_database_owner_role(Connection(), role)
+
+
+def test_database_owner_role_refuses_ineffective_membership_repair():
+    from rubik_core.platform.sql_roles import create_database_owner_role
+
+    class Connection:
+        def __init__(self):
+            self.writes = []
+            self.checks = 0
+
+        def exec_driver_sql(self, statement):
+            self.writes.append(statement)
+
+        def scalar(self, statement, params):
+            assert params == {"owner": "new_owner"}
+            self.checks += 1
+            return False
+
+    connection = Connection()
+    with pytest.raises(PermissionError, match="SET and INHERIT"):
+        create_database_owner_role(connection, "new_owner")
+    assert connection.checks == 2
+    assert connection.writes == [
+        "SET createrole_self_grant = 'set,inherit'",
+        'CREATE ROLE "new_owner" LOGIN',
+        "RESET createrole_self_grant",
+        'GRANT "new_owner" TO CURRENT_USER WITH ADMIN TRUE, INHERIT TRUE, SET TRUE',
+    ]
+
+
+def test_workspace_database_retry_does_not_change_role_membership(monkeypatch):
+    from rubik_core.control.models import WorkspaceConnectionSpec
+    from rubik_core.platform import executor as executor_module
+    from rubik_core.platform.executor import CloudExecutor
+
+    statements = []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def scalar(self, statement, params):
+            sql = str(statement)
+            if "FROM pg_roles" in sql:
+                return "cubie_safe_user"
+            if "FROM pg_database" in sql:
+                return "cubie_safe_user"
+            assert "quote_literal" in sql
+            return "'same_stored_password'"
+
+        def exec_driver_sql(self, statement):
+            statements.append(statement)
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(executor_module, "create_engine", lambda *a, **k: Engine())
+    monkeypatch.setattr(
+        executor_module,
+        "create_database_owner_role",
+        lambda *a: pytest.fail("Existing role membership changed"),
+    )
+    executor = object.__new__(CloudExecutor)
+    executor.admin_database_url = "postgresql+pg8000://unused"
+    executor.ensure_database(
+        WorkspaceConnectionSpec("cubie_safe", "cubie_safe_user", "secret-ref"),
+        "same_stored_password",
+    )
+    assert statements == [
+        "ALTER ROLE \"cubie_safe_user\" WITH PASSWORD 'same_stored_password'",
+        'REVOKE CONNECT ON DATABASE "cubie_safe" FROM PUBLIC',
+        'GRANT CONNECT ON DATABASE "cubie_safe" TO "cubie_safe_user"',
+    ]
 
 
 def test_workspace_db_roles_cannot_cross_connect_when_local_postgres_is_supplied():

@@ -27,6 +27,8 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
+from rubik_core.platform.sql_roles import create_database_owner_role
+
 ROOT = Path(__file__).resolve().parents[2]
 JOBS_MANIFEST = ROOT / "deploy" / "jobs.yaml"
 _DAY = {
@@ -978,22 +980,7 @@ def _create_fresh_control_database() -> None:
                     )
                     is None
                 ):
-                    # PostgreSQL 16 gives CREATEROLE users ADMIN membership
-                    # without SET/INHERIT by default. Ownership assignment and
-                    # the CONNECT grants below need both for this new role.
-                    connection.exec_driver_sql(
-                        "SET createrole_self_grant = 'set,inherit'"
-                    )
-                    try:
-                        connection.exec_driver_sql(f'CREATE ROLE "{user}" LOGIN')
-                    finally:
-                        connection.exec_driver_sql("RESET createrole_self_grant")
-                    # Managed PostgreSQL can bypass the self-grant above. Make
-                    # this new role's intended owner privileges explicit.
-                    connection.exec_driver_sql(
-                        f'GRANT "{user}" TO CURRENT_USER '
-                        "WITH ADMIN TRUE, INHERIT TRUE, SET TRUE"
-                    )
+                    create_database_owner_role(connection, user)
                     quoted_password = connection.scalar(
                         text("SELECT quote_literal(:password)"), {"password": password}
                     )

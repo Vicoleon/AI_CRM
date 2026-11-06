@@ -348,6 +348,37 @@ Local checkpoint `8740100` records the in-progress Task 21/22 expansion before f
 
 Local Chroma embeddings have provider/model/dimension/version-specific indexes with a rebuild-and-activate cutover. The checkpoint also adds a Cloud SQL pgvector candidate index, per-corpus control pointers, GCS source backfill, and cloud RAG integration. The later implementation adds an ordered cloud event outbox, strict managed-source import proof, a durable workspace rebuild Job, same-source mutation locks, cross-corpus source and deletion guards, and concurrent HNSW construction. Independent Python, database, security, frontend and whole-branch reviews accepted the local code after their findings were fixed. Live Cloud SQL DML during index construction, true Vertex/GCS behavior and workload sizing remain go-live checks.
 
+## Development closure checkpoint — 2026-11-06
+
+Phase 2's implementation is present; the PostgreSQL corrections pass their
+real local integration checks. Closure remains in progress until complete
+verification is green on the corrected revision. Historical results do not
+describe the later cloud preparation or automation hold.
+
+| Area | Verified evidence | Remaining boundary |
+| --- | --- | --- |
+| Published development snapshot | Sanitized public commit `df6366f` includes the automation hold and managed-PostgreSQL owner-membership fix. **948 frontend tests**, production build and typecheck passed. | Local private ancestry and operator credentials remain outside the public branch. |
+| Complete backend CI | [Run 42283941773](https://github.com/Vicoleon/AI_CRM/actions/runs/42283941773) finished with **1 failed, 8,828 passed, 4 skipped**. The only failure was a guard test searching for the old `jobs` loop after the held deployment path changed it to `deployed_jobs`. | The stale assertion is corrected in the current worktree; **180 focused guard, deployment and hold tests passed**. This is not yet a green complete CI run for the correction. |
+| Local PostgreSQL 16 follow-up | A disposable local PostgreSQL 16 instance passed **all four integration tests**: fresh control bootstrap and credential-preserving retry, refusal of insufficient existing-role privileges, workspace creation by a non-superuser, and cross-workspace connection denial. | The follow-up first reproduced a redundant native ADMIN grant failure and a missing workspace-owner permission. A shared new-role helper now verifies effective ownership privileges and repairs only missing new-role membership. **104 focused tests passed, 1 skipped** before the real integration gate. Existing-role and password recovery behavior remains unchanged. |
+| Continuous PostgreSQL coverage | The existing backend CI job now supplies a temporary PostgreSQL 16 service and a localhost-only test connection, so its integration tests run rather than silently skip. | No new application job, trigger, schedule or deployment is added. Complete CI on the corrected snapshot still needs to finish. |
+| Platform bootstrap | Reviewed resource and control initialization completed. The control database owner, **10 tables**, schema head `0002_slack_unique_ids`, **zero registered workspaces** and six enabled platform secret versions were verified. Managed PostgreSQL required an explicit owner-membership grant; the corrected code checks new-role privileges before issuing one. | The cloud instance stayed stopped during the local corrections. No application service or real tenant was provisioned. This does not prove OAuth, provider inference, pgvector cutover or corpus capacity. |
+| Development cost hold | SQL was verified **STOPPED**, with activation policy `NEVER`; cloud inventory showed **zero services, zero worker Jobs and zero Scheduler jobs**. Private operator settings and the running local preview have `CUBIE_AUTOMATIONS_ENABLED=false`. | Keep daily and weekly priorities, summaries, imports and background work off. Starting SQL, deploying the application or enabling/resuming automatic processing is a separate operator action under `docs/GO_LIVE.md`; storage and IP charges remain while SQL is stopped. |
+
+Live provider keys, Google OAuth consent and delegation, first Slack/Fathom
+deliveries, Cloud SQL pgvector/HNSW cutover and largest-corpus sizing remain
+go-live checks in [the go-live handoff](../../GO_LIVE.md). They are intentionally
+deferred while automatic processing is held, rather than unimplemented Phase 2
+local features.
+
+Phase 3 has its approved scope in the platform design, sections 4.5–4.6.1:
+connector registry/readiness and Connectors UI, common messaging, the Platform
+workspace wizard, Workspace profile/branding and shared changelog authoring.
+It has no separate execution plan yet. The wizard must reuse the Phase 2
+provisioner and preserve the global automation hold. Sales Coach stays in
+Phase 4. The two AI Priorities cost optimizations remain
+[deferred backlog](2026-11-06-priorities-cost-optimizations-backlog.md); the hold
+does not authorize cleanup or backfill of existing data.
+
 ## Execution inventory
 
 This inventory is part of the plan, not an optional research step. Keep it current if a preceding task changes a path.

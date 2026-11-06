@@ -265,7 +265,9 @@ def test_release_controller_guards_before_build_and_checks_traffic_before_jobs()
     assert deploy.index("state = read_control()") < deploy.index("check_freezes(state)")
     assert deploy.index("check_freezes(state)") < deploy.index("sha = check_tree()")
     assert deploy.index("sha = check_tree()") < deploy.index('label="Cloud Build"')
-    assert deploy.index("latestReadyRevisionName") < deploy.index("for job in jobs:")
+    assert deploy.index("latestReadyRevisionName") < deploy.index(
+        "for job in deployed_jobs:"
+    )
 
 
 # ── guard 7: never deploy inside the declared deploy freeze ──────────────────
