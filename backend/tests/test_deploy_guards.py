@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -484,7 +485,7 @@ def test_an_infra_script_has_no_default_project_or_instance(tmp_path, script):
     proc = subprocess.run(
         ["bash", str(_SCRIPTS / script), "--env", str(empty_env), "--dry-run"],
         cwd=str(tmp_path),  # no .env here, nothing to build
-        env={**env, "CUBIE_PLATFORM_PYTHON": str(_LIB.parents[2] / ".venv/bin/python")},
+        env={**env, "CUBIE_PLATFORM_PYTHON": sys.executable},
         text=True,
         capture_output=True,
         timeout=60,
